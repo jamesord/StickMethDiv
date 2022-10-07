@@ -1,0 +1,174 @@
+---
+title: "Nucleotide diversity of CpG sites differentially methylated between populations"
+author: "James Ord"
+date: "4/5/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# PACKAGES
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(matrixStats)
+library(forcats)
+library(ggh4x)
+
+# FUNCTIONS
+
+`%not_in%` = Negate(`%in%`)
+
+# writeGTF_SiteClass() takes a three-column dataframe as input.
+# the columns must be (1) chromosome, (2) site coordinate, and (3) site class
+writeGTF_SiteClass <- function(input,output) {
+  sitedata<-input
+  sitedata$source<-"none"
+  sitedata$feature<-"transcript"
+  sitedata$score<-"."
+  sitedata$strand<-"+"
+  sitedata$frame<-"."
+  sitedata$gene_id<-paste("\"",sitedata[,3],"\"",sep="")
+  sitedata$attribute<-paste("gene_id ",sitedata$gene_id,";",sep="")
+  GTF<-data.frame(seqname=sitedata[,1],
+                source=sitedata$source,
+                feature=sitedata$feature,
+                start=sitedata[,2],
+                end=sitedata[,2],
+                score=sitedata$score,
+                strand=sitedata$strand,
+                frame=sitedata$frame,
+                attribute=sitedata$attribute)
+  write.table(GTF,file=output,quote=FALSE,col.names=FALSE,row.names=FALSE,sep="\t")
+}
+```
+
+```{r}
+sitesNsamples<-read.table(gzfile("DMC_data_subsample2_140422.tsv.gz"),header=T)
+```
+
+```{r, eval = FALSE}
+options(scipen = 10)
+# write a GTF (needed for popoolation)
+sitesNsamples_for_GTF<-sitesNsamples[c(1,2,4)]
+sitesNsamples_for_GTF$class<-paste(sitesNsamples_for_GTF$chr,sitesNsamples_for_GTF$result_pop,sep="_");sitesNsamples_for_GTF$result_pop<-NULL
+writeGTF_SiteClass(input=sitesNsamples_for_GTF,output="C:/Users/jms_o/Documents/R/pop_DMCs_150422.gtf")
+
+# write a 0-based BED file (needed for samtools)
+write.table(data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start-1,
+                       end=sitesNsamples$start-1,result=sitesNsamples$result_pop),
+            file="C:/Users/jms_o/Documents/R/pop_DMCs_150422.bed",sep="\t",quote=F,row.names = F,col.names = F)
+
+# write a 1-based coordinates file (needed for bcftools)
+write.table(data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start,result=sitesNsamples$result_pop),
+            file="C:/Users/jms_o/Documents/R/pop_DMCs_for_bcftools_150422.txt",sep="\t",quote=F,row.names = F,col.names = F)
+```
+
+### Popoolation
+We get pi, theta, and tajima's d
+
+```{r, engine = 'bash', eval = FALSE}
+#!/bin/bash
+#SBATCH --mail-type=all
+#SBATCH --mail-user=james.ord@vetsuisse.unibe.ch
+#SBATCH --job-name="TK_popoolation_just_pop_results_150422.sh"
+#SBATCH --time=02:00:00
+#SBATCH --cpus-per-task=1
+#SBATCH --mem-per-cpu=100G
+
+for i in SRR869609:10 SRR7470095:12; do
+i1=$(echo $i | cut -d ":" -f 1)
+i2=$(echo $i | cut -d ":" -f 2)
+
+for k in pi theta D; do
+
+perl /storage/homefs/jo20n766/software/popoolation_1.2.2/Variance-at-position.pl --pool-size ${i2} --min-qual 20 --min-coverage 4 --min-count 2 --fastq-type sanger \
+--pileup /storage/workspaces/vetsuisse_fiwi_epev/fiwi_epev001/datasets/dataset_collection/stickleback/PRJNA204958_479509/mapped/MAPQ20_rdup/pileup/${i1}.pileup \
+--gtf pop_DMCs_150422.gtf --output ${i1}_temp.${k} --measure ${k}
+
+sed -i "s/$/\t${i1}/" ${i1}_temp.${k}
+
+done
+done
+
+cat *_temp.theta > temp.theta
+cat *_temp.pi > temp.pi
+cat *_temp.D > temp.D
+
+paste temp.pi <(cut -f 4 temp.theta) <(cut -f 4 temp.D) > pop_DMCs_150422.div
+
+rm *.theta *.pi *.D *.params
+```
+
+### % SNPs of different mutation types
+
+The following script takes a bam file and two files containing site coordinates, runs GATK HaplotypeCaller, and outputs a list of all the sites with biallelic SNPs within each population, including the reference allele and alternate allele.
+
+```{r, engine = 'bash', eval = FALSE}
+#!/bin/bash
+#SBATCH --mail-type=all
+#SBATCH --mail-user=james.ord@vetsuisse.unibe.ch
+#SBATCH --job-name="gatkhapcaller_TK_150422.sh"
+#SBATCH --time=01:00:00
+#SBATCH --cpus-per-task=4
+#SBATCH --mem-per-cpu=30G
+
+today="$(date +'%d%m%y')"
+
+module load vital-it/7
+module load UHTS/Analysis/samtools/1.10
+module load UHTS/Analysis/GenomeAnalysisTK/4.2.0.0
+module load UHTS/Analysis/picard-tools/2.21.8 
+module load UHTS/Analysis/HTSlib/1.10.1
+
+# where i1 is the population and i2 is the ploidy...
+for i in SRR869609:20 SRR7470095:24; do
+i1=$(echo $i | cut -d ":" -f 1)
+i2=$(echo $i | cut -d ":" -f 2)
+
+# filter the bam file to get reads containing the positions of interest
+samtools view -b -h -L pop_DMCs_150422.bed \
+/storage/workspaces/vetsuisse_fiwi_epev/fiwi_epev001/datasets/dataset_collection/stickleback/PRJNA204958_479509/mapped/MAPQ20_rdup/${i1}_aligned_MAPQ20_rdup.bam \
+> ${i1}_aligned_MAPQ20_rdup_sitesNsamples.bam
+
+# add read groups
+picard-tools AddOrReplaceReadGroups I=${i1}_aligned_MAPQ20_rdup_sitesNsamples.bam O=${i1}_aligned_MAPQ20_rdup_sitesNsamples_RG.bam RGLB=lib1 RGPL=illumina RGPU=unit1 RGSM=woof
+
+# then of course they need to be indexed again with samtools index...
+samtools index ${i1}_aligned_MAPQ20_rdup_sitesNsamples_RG.bam
+
+# GATK HaplotypeCaller
+# make sure genome is INDEXED with samtools faidx and a dictionary file has been created with CreateSequenceDictionary
+# in case of problems, try re-generating the index and dictionary files
+
+# HaplotypeCaller seems to run on 4 threads by default, so we can request 4 threads in the SLURM parameters without specifying any threads in the call to GATK
+
+GenomeAnalysisTK HaplotypeCaller -I ${i1}_aligned_MAPQ20_rdup_sitesNsamples_RG.bam \
+--R /storage/workspaces/vetsuisse_fiwi_epev/fiwi_epev001/datasets/dataset_collection/stickleback/reference_genome/stickleback_v5_assembly.fa \
+--sample-ploidy ${i2} -O ${i1}_sitesNsamples_read_variants.g.vcf
+
+# Now, the vcf files generated above contain all the SNPs called in the READS that were extracted in the first step. Therefore, I want to extract only the sites of interest:
+# first bgzip and tabix the vcfs
+bgzip ${i1}_sitesNsamples_read_variants.g.vcf
+tabix ${i1}_sitesNsamples_read_variants.g.vcf.gz
+
+# then filter the VCFs using a 1-based regions file of the sitesNsamples, also filtering to retain only biallelic SNPs
+cut -f1,1,2 pop_DMCs_for_bcftools_150422.txt > temp.txt
+bcftools view ${i1}_sitesNsamples_read_variants.g.vcf.gz -m2 -M2 -v snps --regions-file temp.txt > ${i1}_sitesNsamples_variants.g.vcf.gz
+
+# now print out the table of biallelic SNPs
+zgrep -v "^#" ${i1}_sitesNsamples_variants.g.vcf.gz | awk -v OFS='\t' '{ print $1,$2,$4,$5 } ' > ${i1}_sitesNsamples_biallelic.txt
+# add the population
+sed -i "s/$/\t${i1}/" ${i1}_sitesNsamples_biallelic.txt
+
+# end loop
+done
+
+# concatentate SNP lists from the two populations
+cat *biallelic.txt > sitesNsamples_biallelic_${today}.txt
+# remove temporary files
+rm *biallelic.txt *_variants.g.vcf.gz* *.bam* *temp.txt *.idx
+```
+

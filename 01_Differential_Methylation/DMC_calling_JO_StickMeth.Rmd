@@ -1,0 +1,178 @@
+---
+title: "Getting differentially methylated sites with methylKit: population and experimental comparisons of CpG sites"
+author: "James Ord"
+date: "05/04/2022 (this version)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(methylKit)
+library(matrixStats)
+library(dplyr)
+```
+
+### Reading in files and preprocessing
+
+Here we read in the Bismark coverage files containing the (SNP-filtered) methylation calls and the corresponding phenotype metadata which contains the grouping information for each sample (population and environment). The data and metadata are combined in the methRead command, then some filtering and pre-processing is performed prior to calculating differential methylation.
+Here I also save a dataframe of the methylation levels of each sample at each site, which I use later to get the means and SDs for each site in the population comparison.
+We can also visualise the variation in a PCA plot in the initial stage.
+
+```{r}
+# get phenotype data for this comparison
+pheno <- read.csv("AT_phendata.csv")
+
+# set path to methylation files
+meth_path<-"cov/"
+
+file.list<-as.list(list.files(meth_path,pattern = "\\.cov.gz$",full.names = TRUE))
+
+myobj<-methRead(file.list,
+               sample.id=as.list(pheno$Sample),
+               assembly="stickleback_v5",
+               treatment=c(0,0,0,1,1,1,2,2,3,3,3),
+               context="CpG",
+               mincov = 5,
+               pipeline = "bismarkCoverage"
+)
+
+# filter by lowest and highest acceptable coverage
+filtered.myobj=filterByCoverage(myobj,lo.count=5,lo.perc=NULL,
+                                hi.count=NULL,hi.perc=99.9)
+myobj<-NULL
+
+# merge samples
+meth<-unite(filtered.myobj, destrand=FALSE)
+filtered.myobj<-NULL
+
+# filter out data from the chromosomes we don't want
+meth<-meth[meth$chr!="chrM", ]
+meth<-meth[meth$chr!="chrY", ]
+meth<-meth[meth$chr!="chrXIX", ]
+
+# further filter by % methylation. We want to exclude sites with no methylation or 100% methylation in all samples (no variation)
+pm<-percMethylation(meth)
+
+methsums_pop<-rowSums(pm[,c(1:3,9:11)])
+meth<-meth[methsums_pop>0&methsums_pop<600,]
+pm<-NULL
+
+# Finally have a look at the PCA
+PCASamples(meth)
+```
+We now have a collection of sites which passed the coverage threshold (5 reads) in all of the samples. There are just over a million such sites.
+
+I think this is important even though we will be doing separate comparisons of subsets of the dataset. For example, when we compare methylation between populations, we may want to know which sites are also affected by experimental salinity manipulation, and which ones are not. If a given site is not found in the experimental comparisons, we will not know whether it is 'stable' or 'plastic'.
+
+In the PCA, notice the higher variation in the freshwater (blue) samples. The same was found in the analysis of Artemov et al (2017).
+
+### Differential methylation
+
+methylKit only allows comparisons between two groups, so we need to split up the analysis and calculate differential methylation separately for:
+1) Populations: Marine fish in saltwater vs Freshwater fish in freshwater
+2) Experimental salinity decrease: Marine fish in saltwater vs Marine fish in freshwater
+3) Experimental salinity increase: Freshwater fish in freshwater vs freshwater fish in saltwater
+
+So, we make three separate methylBase objects and reassign the treatment codes. Note that for the third comparison there are only five samples. This is because one of the libraries was excluded at an earlier step. Subsequently, the 'freshwater fish in saltwater' group has only n=2.
+
+```{r}
+meth_pops    <- reorganize(meth,sample.ids=c("SRR3632630","SRR3632631","SRR3632633","SRR3632644","SRR3632645","SRR3632647"),
+                            treatment=c(0,0,0,1,1,1) )
+meth_exp_M2F <- reorganize(meth,sample.ids=c("SRR3632630","SRR3632631","SRR3632633","SRR3632634","SRR3632636","SRR3632637"),
+                            treatment=c(0,0,0,1,1,1) )
+meth_exp_F2M <- reorganize(meth,sample.ids=c("SRR3632634","SRR3632636","SRR3632637","SRR3632639","SRR3632641"             ),
+                            treatment=c(0,0,0,1,1  ) )
+```
+
+Now we can run calculateDiffMeth for each comparison. This takes several minutes for each comparison.
+
+```{r}
+Diff_pops<-calculateDiffMeth(meth_pops);meth_pops<-NULL
+DMC_data_pops<-getData(Diff_pops)
+DMC_data_pops<-DMC_data_pops[c(1,2,6,7)]
+colnames(DMC_data_pops)[c(3,4)]<-c("qval_pop","meth_diff_pop")
+DMC_data_pops$result_pop<-ifelse(DMC_data_pops$qval_pop<=0.05&DMC_data_pops$meth_diff_pop>=15,"hyper",
+                                 ifelse(DMC_data_pops$qval_pop<=0.05&DMC_data_pops$meth_diff_pop<= -15,"hypo","non"))
+Diff_pops<-NULL
+
+Diff_M2F<-calculateDiffMeth(meth_exp_M2F);meth_exp_M2F<-NULL
+DMC_data_M2F<-getData(Diff_M2F)
+DMC_data_M2F<-DMC_data_M2F[c(1,2,6,7)]
+colnames(DMC_data_M2F)[c(3,4)]<-c("qval_M2F","meth_diff_M2F")
+DMC_data_M2F$result_M2F<-ifelse(DMC_data_M2F$qval_M2F<=0.05&DMC_data_M2F$meth_diff_M2F>=15,"hyper",
+                                 ifelse(DMC_data_M2F$qval_M2F<=0.05&DMC_data_M2F$meth_diff_M2F<= -15,"hypo","non"))
+Diff_M2F<-NULL
+
+Diff_F2M<-calculateDiffMeth(meth_exp_F2M);meth_exp_F2M<-NULL
+DMC_data_F2M<-getData(Diff_F2M)
+DMC_data_F2M<-DMC_data_F2M[c(1,2,6,7)]
+colnames(DMC_data_F2M)[c(3,4)]<-c("qval_F2M","meth_diff_F2M")
+DMC_data_F2M$result_F2M<-ifelse(DMC_data_F2M$qval_F2M<=0.05&DMC_data_F2M$meth_diff_F2M>=15,"hyper",
+                                 ifelse(DMC_data_F2M$qval_F2M<=0.05&DMC_data_F2M$meth_diff_F2M<= -15,"hypo","non"))
+Diff_F2M<-NULL
+
+#
+DMC_data_all<-merge(DMC_data_pops,merge(DMC_data_M2F,DMC_data_F2M,by=c("chr","start")),by=c("chr","start"))
+DMC_data_pops<-NULL;DMC_data_MtoF<-NULL;DMC_data_FtoM<-NULL # nullify separate dataframes
+```
+
+We can summarise the differential methylation results (population comparison) from this final dataframe.
+
+```{r}
+paste("            non-DM:",nrow(subset(DMC_data_all,result_pop=="non")),sep=" ")
+paste("FW-hypermethylated:",nrow(subset(DMC_data_all,result_pop=="hyper")),sep=" ")
+paste(" FW-hypomethylated:",nrow(subset(DMC_data_all,result_pop=="hypo")),sep=" ")
+```
+Save the results as gzipped tsv files. I'll save both the complete dataset, and a smaller version which contains a subset of 10% of non-differentially methylated sites.
+```{r}
+# Because this is a very large dataframe, let's keep only the columns we need for the subsequent analyses.
+# This is all of them except for the q-value columns.
+DMC_data_all<-DMC_data_all[-c(3,6,9)]
+
+# add the mean and SDs of % methylation
+# get the methylation levels for all sites in the filtered dataset - we'll want to play with these later
+pm<-as.data.frame(percMethylation(meth))
+pm$chr<-meth$chr
+pm$start<-meth$start
+pm$mean_MatM <-rowMeans(pm[,c(1:3)])
+pm$SD_MatM   <-rowSds  (as.matrix(pm[,c(1:3)]))
+pm$mean_FatF <-rowMeans(pm[,c(9:11)])
+pm$SD_FatF   <-rowSds  (as.matrix(pm[,c(9:11)]))
+DMC_data_all<-merge(DMC_data_all,pm[c(12:17)],by=c("chr","start"))
+
+# site ID column is useful
+DMC_data_all$ID<-paste(DMC_data_all$chr,DMC_data_all$start,sep="_")
+
+# write out the full table
+write.table(DMC_data_all,file="C:/Users/jms_o/Documents/R/DMC_data_all_110422.tsv",row.names = FALSE,quote=FALSE,sep="\t")
+system("gzip C:/Users/jms_o/Documents/R/DMC_data_all_110422.tsv")
+```
+
+### DOWNSAMPLING
+
+Because DMCs may not be distributed randomly across a chromosome, taking a completely random subset of non-DMCs from across the chromosomes may introduce bias. Therefore, the sampling of non-DMCs should be roughly proportionate to the number of DMCs in that part of the chromosome.
+Here, I sample from regions spanning 2Mb either side of each differentially methylated site. Given an average chromosome length of 20792555, each sampling region is just less than 1/5th of the average chromosome size.
+
+```{r}
+non<-subset(DMC_data_all,result_pop=="non")
+DMC<-subset(DMC_data_all,result_pop!="non")
+
+set.seed(230792)
+sampled_sites<-NULL
+for (i in 1:nrow(DMC)){
+  site<-DMC[i,]
+  downstream_lim<-site$start-2000000
+  upstream_lim<-site$start+2000000
+  sampling_region<-subset(non,chr==site$chr & start < upstream_lim & start>downstream_lim)
+  sampled_site<-sample_n(sampling_region,size=1)
+  sampled_sites<-rbind(sampled_sites,sampled_site)
+}
+
+sampled_sites_dedup<-sampled_sites[!duplicated(sampled_sites),]
+
+DMC_data_subsample2<-rbind(sampled_sites_dedup,DMC)
+write.table(DMC_data_subsample2,file="C:/Users/jms_o/Documents/R/DMC_data_subsample2_140422.tsv",row.names = FALSE,quote=FALSE,sep="\t")
+system("gzip C:/Users/jms_o/Documents/R/DMC_data_subsample2_140422.tsv")
+
+```

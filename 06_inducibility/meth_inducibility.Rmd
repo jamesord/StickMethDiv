@@ -1,0 +1,175 @@
+---
+title: "Nucleotide diversity as a function of inducibility"
+author: "James Ord"
+date: "4/12/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# PACKAGES
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(matrixStats)
+library(forcats)
+library(OneR)
+
+# FUNCTIONS
+
+`%not_in%` = Negate(`%in%`)
+
+# writeGTF_SiteClass() takes a three-column dataframe as input.
+# the columns must be (1) chromosome, (2) site coordinate, and (3) site class
+writeGTF_SiteClass <- function(input,output) {
+  sitedata<-input
+  sitedata$source<-"none"
+  sitedata$feature<-"transcript"
+  sitedata$score<-"."
+  sitedata$strand<-"+"
+  sitedata$frame<-"."
+  sitedata$gene_id<-paste("\"",sitedata[,3],"\"",sep="")
+  sitedata$attribute<-paste("gene_id ",sitedata$gene_id,";",sep="")
+  GTF<-data.frame(seqname=sitedata[,1],
+                source=sitedata$source,
+                feature=sitedata$feature,
+                start=sitedata[,2],
+                end=sitedata[,2],
+                score=sitedata$score,
+                strand=sitedata$strand,
+                frame=sitedata$frame,
+                attribute=sitedata$attribute)
+  write.table(GTF,file=output,quote=FALSE,col.names=FALSE,row.names=FALSE,sep="\t")
+}
+
+```
+
+```{r}
+sitesNsamples<-read.table(gzfile("DMC_data_subsample2_140422.tsv.gz"),header=T)
+```
+First just classify differentially methylated sites according to whether they are induced or not in either of the populations
+```{r}
+sitesNsamples$induced_any<-ifelse(sitesNsamples$result_M2F!="non"|sitesNsamples$result_F2M!="non","yes","no")
+
+induced<-subset(sitesNsamples,result_pop!="non"&induced_any=="yes")
+induced<-induced %>% add_count(result_pop, chr)
+induced$class<-paste(induced$chr,induced$result_pop,"induced",induced$n,sep="_")
+non_induced<-subset(sitesNsamples,result_pop!="non"&induced_any=="no")
+non_induced<-non_induced %>% add_count(result_pop, chr)
+non_induced$class<-paste(non_induced$chr,non_induced$result_pop,"noninduced",non_induced$n,sep="_")
+sites_by_induc<-rbind(induced[c(1,2,16)],non_induced[c(1,2,16)])
+
+writeGTF_SiteClass(input=sites_by_induc,output="C:/Users/jms_o/Documents/R/pop_induc_150422.gtf")
+```
+
+Classify differentially methylated sites according to which populations they are induced in
+```{r}
+induc_excl<-sitesNsamples
+induc_excl$induc_excl_cat<-ifelse(induc_excl$result_M2F!="non"&induc_excl$result_F2M=="non","MarineOnly",
+                            ifelse(induc_excl$result_F2M!="non"&induc_excl$result_M2F=="non","FWonly","non_exclusive"))
+inducsums<-subset(induc_excl,(result_M2F!="non"|result_F2M!="non")) %>% group_by(result_pop,induc_excl_cat,chr) %>% summarise(n_on_chr=n())
+induc_excl<-merge(induc_excl,inducsums,by=c("result_pop","induc_excl_cat","chr"))
+induc_excl_forGTF<-subset(induc_excl,induc_excl_cat!="non_exclusive"&result_pop!="non")[c(3,4,1,2,15)]
+induc_excl_forGTF$cat<-paste(induc_excl_forGTF$chr,induc_excl_forGTF$result_pop,induc_excl_forGTF$induc_excl_cat,induc_excl_forGTF$n_on_chr,sep="_")
+writeGTF_SiteClass(induc_excl_forGTF[c(1,2,6)],output="C:/Users/jms_o/Documents/R/induc_excl_200422.gtf")
+```
+
+### Popoolation
+We get pi, theta, and tajima's d
+
+```{r, engine = 'bash', eval = FALSE}
+#!/bin/bash
+#SBATCH --mail-type=all
+#SBATCH --mail-user=james.ord@vetsuisse.unibe.ch
+#SBATCH --job-name="TK_popoolation_induc_150422.sh"
+#SBATCH --time=10:00:00
+#SBATCH --cpus-per-task=1
+#SBATCH --mem-per-cpu=100G
+
+for i in SRR869609:10 SRR7470095:12; do
+i1=$(echo $i | cut -d ":" -f 1)
+i2=$(echo $i | cut -d ":" -f 2)
+
+for k in pi theta D; do
+
+perl /storage/homefs/jo20n766/software/popoolation_1.2.2/Variance-at-position.pl --pool-size ${i2} --min-qual 20 --min-coverage 3 --min-count 2 --fastq-type sanger \
+--pileup /storage/workspaces/vetsuisse_fiwi_epev/fiwi_epev001/datasets/dataset_collection/stickleback/PRJNA204958_479509/mapped/MAPQ20_rdup/pileup/${i1}.pileup \
+--gtf pop_induc_150422.gtf --output ${i1}_temp.${k} --measure ${k}
+
+sed -i "s/$/\t${i1}/" ${i1}_temp.${k}
+
+done
+done
+
+cat *_temp.theta > temp.theta
+cat *_temp.pi > temp.pi
+cat *_temp.D > temp.D
+
+paste temp.pi <(cut -f 4 temp.theta) <(cut -f 4 temp.D) > pop_induc_150422.div
+
+rm *.theta *.pi *.D *.params
+
+```
+
+We are taking all the sites that are induced in either population, then bin them according to their inducibility in that specific population.
+
+```{r}
+# BINS OF MEAN METHYLATION PER RESULT PER POPULATION
+head(sitesNsamples)
+induc_M<-subset(sitesNsamples,result_M2F!="non")[c(1,2,4,5,13)];colnames(induc_M)[4]<-"induced_change";induc_M$Population<-"Marine"
+induc_F<-subset(sitesNsamples,result_F2M!="non")[c(1,2,4,7,13)];colnames(induc_F)[4]<-"induced_change";induc_F$Population<-"Freshwater"
+meth_induc_long<-rbind(induc_M,induc_F)
+meth_induc_long$abs_induced_change<-abs(meth_induc_long$induced_change)
+
+for (i in c("Marine","Freshwater")){
+induc_pop<-subset(meth_induc_long,Population==i)
+inducbins<-bin(induc_pop,method="content", nbins = 50)
+inducbins$abs_induced_change<-as.numeric(inducbins$abs_induced_change)
+inducbins<-inducbins[c(5,7)];colnames(inducbins)<-c("ID","abs_induced_change_bin")
+induc_pop<-merge(induc_pop,inducbins,by="ID")
+mean_induc_pop<-induc_pop %>%
+  group_by(abs_induced_change_bin) %>%
+  summarise(mean_abs_induced_change = mean(abs_induced_change),n=n())
+induc_pop<-merge(induc_pop,mean_induc_pop,by="abs_induced_change_bin",all.x=TRUE)
+
+# so now we have the bins...
+induc_pop$class<-paste(induc_pop$mean_abs_induced_change,induc_pop$n,sep="_")
+for_gtf<-induc_pop[c(3,4,11)]
+pop_acc<-ifelse(i=="Marine","SRR7470095","SRR869609")
+writeGTF_SiteClass(input=for_gtf,output=paste("C:/Users/jms_o/Documents/R/pop_induc_bins",pop_acc,"190422.gtf",sep="_"))
+}
+```
+
+### Popoolation
+```{r, engine = 'bash', eval = FALSE}
+#!/bin/bash
+#SBATCH --mail-type=all
+#SBATCH --mail-user=james.ord@vetsuisse.unibe.ch
+#SBATCH --job-name="TK_popoolation_induc_bins_150422.sh"
+#SBATCH --time=10:00:00
+#SBATCH --cpus-per-task=1
+#SBATCH --mem-per-cpu=100G
+
+for i in SRR869609:10 SRR7470095:12; do
+i1=$(echo $i | cut -d ":" -f 1)
+i2=$(echo $i | cut -d ":" -f 2)
+
+for k in pi theta D; do
+
+perl /storage/homefs/jo20n766/software/popoolation_1.2.2/Variance-at-position.pl --pool-size ${i2} --min-qual 20 --min-coverage 3 --min-count 2 --fastq-type sanger \
+--pileup /storage/workspaces/vetsuisse_fiwi_epev/fiwi_epev001/datasets/dataset_collection/stickleback/PRJNA204958_479509/mapped/MAPQ20_rdup/pileup/${i1}.pileup \
+--gtf pop_induc_bins_${i1}_150422.gtf --output ${i1}_temp.${k} --measure ${k}
+
+sed -i "s/$/\t${i1}/" ${i1}_temp.${k}
+
+done
+
+paste ${i1}_temp.pi <(cut -f 4 ${i1}_temp.theta) <(cut -f 4 ${i1}_temp.D) > ${i1}_induc_temp.div
+
+done
+
+cat *_induc_temp.div > pop_induc_bins_150422.div
+rm *_temp.*
+
+```

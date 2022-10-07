@@ -1,0 +1,1116 @@
+---
+title: "Figure compilation"
+output: html_document
+date: '2022-04-13'
+---
+
+```{r setup, include=FALSE}
+Sys.setenv(LANG = "en")
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(matrixStats)
+library(forcats)
+library(ggh4x)
+library(gridExtra)
+library("Kendall")
+library("coin")
+library("emmeans")
+library("ggtext")
+
+# FUNCTIONS
+`%not_in%` = Negate(`%in%`)
+
+sigstar<-function(pval,ntests){ifelse(pval*ntests<0.001,"***",
+                                      ifelse(pval*ntests<0.01,"**",
+                                             ifelse(pval*ntests<0.05,"*","N/S")))}
+```
+
+```{r}
+sitesNsamples<-read.table(gzfile("DMC_data_subsample2_140422.tsv.gz"),header=T)
+```
+
+# FIGURE 2
+
+Figure 2, the first analysis figure, will comprise key measures of nucleotide diversity at differentially methylated sites.
+
+The plot of pi will be the centrepiece of the composite figure, with smaller figures below to show Tajima's D and also the % of sites with SNPs of different types.
+
+```{r}
+methsites_allpops <- read.table("pop_DMCs_150422.div",sep="\t")
+methsites_allpops<-separate(methsites_allpops,V1,into = c("chr","result"),sep="_")
+colnames(methsites_allpops)<-c("chr","result","n_SNPs","cov","pi","pop","theta","tajd")
+
+methsites_allpops$result <- factor(methsites_allpops$result,levels=c("non","hypo","hyper"))
+methsites_allpops$Population<-ifelse(methsites_allpops$pop=="SRR7470095","Marine","Freshwater")
+methsites_allpops$Population <- factor(methsites_allpops$Population,levels=c("Marine","Freshwater"))
+
+# Pi
+# Wilcoxon tests
+wt_results_pi<-NULL
+for (i in c("non","hypo","hyper")){
+  wt<-wilcox.test(subset(methsites_allpops,result==i&Population=="Marine")$pi,
+            subset(methsites_allpops,result==i&Population=="Freshwater")$pi,
+            paired = TRUE, alternative = "two.sided")
+  wt_results_pi0<-data.frame(V=wt$statistic,p.val=wt$p.value,meth_result=i)
+  wt_results_pi<-rbind(wt_results_pi,wt_results_pi0)}
+# compute significance stars
+wt_results_pi$star<-sigstar(wt_results_pi$p.val,1)
+# plot code
+piplotpop<-ggplot(methsites_allpops, aes(x = result, y = pi, fill = Population)) +
+  theme_bw()+
+  geom_boxplot(outlier.shape = NA) +
+  labs(x="",y="\U03C0 (chromosome-level)",title = "A")+
+  geom_point(pch = 21, position = position_jitterdodge(0.1))+
+  scale_x_discrete(labels=c(paste("Non-DMC"),
+                            paste("FW-Hypo"),
+                            paste("FW-Hyper")))+
+  annotate(geom='text', label = c(wt_results_pi$star[1],wt_results_pi$star[2],wt_results_pi$star[3]),
+           x = c(1,2,3), y = max(methsites_allpops$pi)*1.15)+
+  annotate(geom='segment',x=c(0.75,1.75,2.75),xend=c(1.25,2.25,3.25),
+           y=max(methsites_allpops$pi)*1.1,yend=max(methsites_allpops$pi)*1.1)+
+  theme(legend.position="bottom",legend.justification='right')+
+  #theme(legend.position = c(0.15,0.75))+
+  theme(legend.background = element_rect(colour ="black"))+
+  scale_fill_manual(values=c("steelblue4","palegreen"),name="Population: ")
+
+# Tajima's D
+# Wilcoxon tests
+wt_results_tajd<-NULL
+for (i in c("non","hypo","hyper")){
+  wt<-wilcox.test(subset(methsites_allpops,result==i&Population=="Marine")$tajd,
+            subset(methsites_allpops,result==i&Population=="Freshwater")$tajd,
+            paired = TRUE, alternative = "two.sided")
+  wt_results_tajd0<-data.frame(V=wt$statistic,p.val=wt$p.value,meth_result=i)
+  wt_results_tajd<-rbind(wt_results_tajd,wt_results_tajd0)}
+# compute significance stars
+wt_results_tajd$star<-sigstar(wt_results_tajd$p.val,1)
+# plot code
+tajplotpop<-ggplot(methsites_allpops, aes(x = result, y = tajd, fill = Population)) +
+  theme_bw()+
+  geom_boxplot(outlier.shape = NA) +
+  labs(x="",y="Tajima's *D* (chromosome-level)",title = "C")+
+  geom_point(pch = 21, position = position_jitterdodge(0.1))+
+  scale_x_discrete(labels=c(paste("Non-DMC",sep=""),
+                            paste("FW-Hypo",sep=""),
+                            paste("FW-Hyper",sep="")))+
+  annotate(geom='text', label = c(wt_results_tajd$star[1],wt_results_tajd$star[2],wt_results_tajd$star[3]),
+           x = c(1,2,3), y = max(methsites_allpops$tajd)*1.25)+
+  annotate(geom='segment',x=c(0.75,1.75,2.75),xend=c(1.25,2.25,3.25),
+           y=max(methsites_allpops$tajd)*1.1,yend=max(methsites_allpops$tajd)*1.1)+
+  theme(legend.position="none")+
+  scale_fill_manual(values=c("steelblue4","palegreen"))+
+  theme(axis.title.y = element_markdown())
+```
+
+% sites with different SNP types
+
+Right, it turns out just plotting this is quite a convoluted affair...
+
+```{r}
+bial<-read.table("sitesNsamples_biallelic_150422.txt")
+colnames(bial)<-c("chr","start","ref","alt","Population")
+bial$Population<-ifelse(bial$Population=="SRR7470095","Marine","Freshwater")
+bial<-merge(bial, sitesNsamples[c(1,2,4)],by=c("chr","start"))
+
+bial$mutation_type<-paste(bial$ref,bial$alt,sep="-")
+bial$mutation_type<-ifelse(bial$mutation_type=="C-T"|bial$mutation_type=="G-A","C-T/G-A",
+                      "other")
+
+bial_counts<-bial %>%
+  group_by(Population,result_pop,mutation_type,chr) %>%
+  summarise(n_biallelic=n())
+
+chr_site_counts<-sitesNsamples %>%
+  group_by(result_pop,chr) %>%
+  summarise(n_sites=n())
+
+bial_counts<-merge(bial_counts,chr_site_counts,by=c("chr","result_pop"))
+
+# some combinations do not have some chromosomes represented, meaning counts for these chromosomes do not appear
+# the following code fixes this in a way that seems more convoluted than it needs to be.
+chr_levels<-data.frame(chr=levels(as.factor(sitesNsamples$chr)))
+chr_levels<-rbind(chr_levels,data.frame(chr="dummy"))
+bial_counts$combo<-paste(bial_counts$Population,bial_counts$result_pop,bial_counts$mutation_type,sep="_")
+combos<-NULL
+for (i in levels(as.factor(bial_counts$combo))){
+  combo<-subset(bial_counts,combo==i)
+  absentees<-subset(chr_levels,chr %not_in% combo$chr)
+  absentees$result_pop<-combo$result_pop[1];absentees$Population<-combo$Population[1]
+  absentees$mutation_type<-combo$mutation_type[1];absentees$n_biallelic<-0
+  absentees$n_sites<-combo$n_sites[1];absentees$combo<-combo$combo[1]
+  combo<-rbind(combo,absentees)
+  combos<-rbind(combos,combo)
+}
+
+# re-assign 'bial_counts' to the fixed counts dataframe with the dummy chromosome removed
+bial_counts<-subset(combos,chr!="dummy")
+# calculate % sites with SNPs for each population/meth result/SNP type combo
+bial_counts$perwithsnp<-(bial_counts$n_biallelic/bial_counts$n_sites)*100
+
+# paired tests
+t_results_perSNPs<-NULL
+for (i in c("non","hypo","hyper")){
+  t_ctga<-t.test(subset(bial_counts,result_pop==i&Population=="Marine"&mutation_type=="C-T/G-A")$perwithsnp,
+            subset(bial_counts,result_pop==i&Population=="Freshwater"&mutation_type=="C-T/G-A")$perwithsnp,
+            paired = TRUE, alternative = "two.sided")
+  shap_ctga<-shapiro.test(subset(bial_counts,result_pop==i&Population=="Marine"&mutation_type=="C-T/G-A")$perwithsnp-
+            subset(bial_counts,result_pop==i&Population=="Freshwater"&mutation_type=="C-T/G-A")$perwithsnp)
+  temp_ctga<-data.frame(p.val=t_ctga$p.value,result_pop=i,mutation_type="C-T/G-A",shapiro.p=shap_ctga$p.value)
+  t_other<-t.test(subset(bial_counts,result_pop==i&Population=="Marine"&mutation_type=="other")$perwithsnp,
+            subset(bial_counts,result_pop==i&Population=="Freshwater"&mutation_type=="other")$perwithsnp,
+            paired = TRUE, alternative = "two.sided")
+  shap_other<-shapiro.test(subset(bial_counts,result_pop==i&Population=="Marine"&mutation_type=="other")$perwithsnp-
+            subset(bial_counts,result_pop==i&Population=="Freshwater"&mutation_type=="other")$perwithsnp)
+  temp_other<-data.frame(p.val=t_other$p.value,result_pop=i,mutation_type="other",shapiro.p=shap_other$p.value)
+  temp<-rbind(temp_ctga,temp_other)
+  t_results_perSNPs<-rbind(t_results_perSNPs,temp)}
+
+# compute significance stars
+t_results_perSNPs$star<-sigstar(t_results_perSNPs$p.val,1)
+```
+
+Note that the P value for the shapiro test is significant for the hyper/other combination, indicating that the distribution of pairwise differences differs significantly from a normal distribution, thus violating the normality assumption of the t-test. The alternative Wilcoxon test would also be inappropriate because many of the pairwise differences in this comparison are 0. There is probably another kind of test we could use for this, but because there is no observable difference in this category and for the sake of simplicity, we will just ignore this test result and not use it.
+
+The remaining t-test results we will place on the plot below.
+
+```{r}
+## PLOT
+# Something like this...
+bial_counts$result_pop <- factor(bial_counts$result_pop,levels=c("non","hypo","hyper"))
+bial_counts$Population <- factor(bial_counts$Population,levels=c("Marine","Freshwater"))
+
+
+dat_text <- data.frame(
+  label = c(c("***","*","***"), c("***","**")),
+  mutation_type   = c(rep("C-T/G-A",3), rep("other",2)),
+  Population   = rep("Marine",5),
+  x     = c(1,2,3,1,2),
+  y     = c(rep(max(subset(bial_counts,mutation_type=="C-T/G-A")$perwithsnp*1.2),3),
+            rep(max(subset(bial_counts,mutation_type==  "other")$perwithsnp*1.25),2)))
+dat_lines <- data.frame(
+  mutation_type   = c(rep("C-T/G-A",3), rep("other",2)),
+  Population   = rep("Marine",5),
+  x     = c(0.75,1.75,2.75,0.75,1.75),
+  xend  = c(1.25,2.25,3.25,1.25,2.25),
+  y     = c(rep(max(subset(bial_counts,mutation_type=="C-T/G-A")$perwithsnp*1.1),3),
+            rep(max(subset(bial_counts,mutation_type==  "other")$perwithsnp*1.1),2)),
+  yend  = c(rep(max(subset(bial_counts,mutation_type=="C-T/G-A")$perwithsnp*1.1),3),
+            rep(max(subset(bial_counts,mutation_type==  "other")$perwithsnp*1.1),2)))
+
+design <-"A
+          A
+          A
+          B"
+mutplotpop<-ggplot(bial_counts, aes(x = result_pop, y = perwithsnp, fill = Population)) +
+  theme_bw()+
+  geom_boxplot(outlier.shape = NA) +
+  labs(x="",y="% sites with biallelic SNPs (chromosome-level)",title = "D")+
+  geom_point(pch = 21, position = position_jitterdodge(0.1))+
+  scale_x_discrete(labels=c(paste("Non-DMC",sep=""),
+                            paste("FW-Hypo",sep=""),
+                            paste("FW-Hyper",sep="")))+
+  facet_manual(mutation_type ~ .,design, scales="free") +
+  theme(strip.background = element_rect(color = "black"))+
+  theme(legend.position="none")+
+  geom_text(data=dat_text,mapping=aes(x=x, y=y, label=label),vjust="inward")+
+  geom_segment(data=dat_lines,mapping=aes(x=x,xend=xend,y=y,yend=yend))+
+  scale_fill_manual(values=c("steelblue4","palegreen"))
+```
+
+ADDITION 25/06/22: FST OF DMCs / NON-DMCs
+
+You know what, we might make this figure 1b
+
+```{r}
+dmcfst<-read.table("WS_MAS_pop_DMCs.fstlite")
+
+dmcfst<-separate(dmcfst,V1,into=c("chr","result"),sep="_")
+
+dmcfst$result<-factor(dmcfst$result,levels=c("non","hypo","hyper"))
+
+# statistical tests
+# test for normality
+shapiro.test(subset(dmcfst,result=="non")$V2)
+shapiro.test(subset(dmcfst,result=="hypo")$V2) # this one significantly differs from normal distribution, so we use wilkoxon
+shapiro.test(subset(dmcfst,result=="hyper")$V2) # this one significantly differs from normal distribution, so we use wilkoxon
+# test for hypermeth sites
+wthypo<-wilcox.test(V2~result,data=subset(dmcfst,result!="hyper"))
+# test for hypometh sites
+wthyper<-wilcox.test(V2~result,data=subset(dmcfst,result!="hypo"))
+
+fstplotpop<-ggplot(dmcfst, aes(x = result, y = V2)) +
+  theme_bw()+
+  geom_boxplot(outlier.shape = NA) +
+  labs(x="",y="Fst (chromosome-level)",title = "B")+
+  geom_point(pch = 21, position = position_jitter(0.1),fill="white")+
+  scale_x_discrete(labels=c("Non-DMC","FW-Hypo","FW-Hyper"))+
+  #scale_fill_manual(values=c("gray33","royalblue3","darkorange3"))+
+  theme(legend.position = "none")+
+  annotate(geom='text', label = c(sigstar(wthypo$p.value,1),sigstar(wthyper$p.value,1)),
+           x = c(1.5,2), y = c(max(dmcfst$V2)*1.1,max(dmcfst$V2)*1.2))+
+  annotate(geom='segment',x=c(1,1),xend=c(2,3),
+           y=c(max(dmcfst$V2)*1.05,max(dmcfst$V2)*1.15),yend=c(max(dmcfst$V2)*1.05,max(dmcfst$V2)*1.15))+
+  theme(plot.margin = unit(c(5.5, 5.5, 46, 5.5), "pt"))
+
+theme_bw()$plot.margin
+
+```
+
+PRINT COMPOSITE FIGURE (FIG. 2)
+
+```{r}
+lay <- rbind(c(1,1,1,1,2,2),
+             c(1,1,1,1,2,2),
+             c(3,3,3,4,4,4),
+             c(3,3,3,4,4,4))
+
+grobz <- lapply(list(piplotpop,fstplotpop,tajplotpop,mutplotpop), ggplotGrob)
+
+png(filename = "Figure2_051022.png", width = 6000, height = 6000,res=600)
+grid.arrange(grobs = grobz, layout_matrix = lay)
+dev.off()
+```
+
+
+SUPPLEMENTARY FIGURES ASSOCIATED WITH FIGURE 2
+
+THE POPULATION BOTTLENECK? (FIG. S1)
+
+5924 sliding windows
+
+```{r}
+chrI <- read.table("chrI.div",sep="\t")
+
+colnames(chrI)<-c("chr","window","n_SNPs","cov","pi","pop","tajd")
+chrI$pi<-as.numeric(chrI$pi)
+chrI$tajd<-as.numeric(chrI$tajd)
+
+chrI$Population<-ifelse(chrI$pop=="SRR7470095","Marine","Freshwater")
+chrI$Population <- factor(chrI$Population,levels=c("Marine","Freshwater"))
+
+itpi<-independence_test(pi~Population,data=chrI,distribution="approximate",alternative="greater")
+ittaj<-independence_test(tajd~Population,data=chrI,distribution="approximate",alternative="less")
+
+piplotchrI<-ggplot(chrI, aes(x = Population, y = pi, fill = Population)) +
+  theme_bw()+
+  geom_boxplot() +
+  labs(x="Population",y="\U03C0 of 10kb window",title = "A")+
+  theme(legend.position = "none")+
+  annotate(geom='text', label = sigstar(1e-04,1),
+           x = 1.5, y = max(chrI[!is.na(chrI$pi),]$pi)*1.15)+
+  annotate(geom='segment',x=1,xend=2,
+           y=max(chrI[!is.na(chrI$pi),]$pi)*1.1,yend=max(chrI[!is.na(chrI$pi),]$pi)*1.1)+
+  scale_fill_manual(values=c("steelblue4","palegreen"))
+
+tajplotchrI<-ggplot(chrI, aes(x = Population, y = tajd, fill = Population)) +
+  theme_bw()+
+  geom_boxplot() +
+  labs(x="Population",y="Tajima's *D* of 10kb window",title = "B")+
+  theme(legend.position = "none")+
+  annotate(geom='text', label = sigstar(1e-04,1),
+           x = 1.5, y = max(chrI[!is.na(chrI$tajd),]$tajd)*1.15)+
+  annotate(geom='segment',x=1,xend=2,
+           y=max(chrI[!is.na(chrI$tajd),]$tajd)*1.1,yend=max(chrI[!is.na(chrI$tajd),]$tajd)*1.1)+
+  scale_fill_manual(values=c("steelblue4","palegreen"))+
+  theme(axis.title.y = element_markdown())
+
+```
+
+THETA (FIG. S2)
+
+```{r}
+# Watterson's theta
+# Wilcoxon tests
+wt_results_theta<-NULL
+for (i in c("non","hypo","hyper")){
+  wt<-wilcox.test(subset(methsites_allpops,result==i&Population=="Marine")$theta,
+            subset(methsites_allpops,result==i&Population=="Freshwater")$theta,
+            paired = TRUE, alternative = "two.sided")
+  wt_results_theta0<-data.frame(V=wt$statistic,p.val=wt$p.value,meth_result=i)
+  wt_results_theta<-rbind(wt_results_theta,wt_results_theta0)}
+# compute significance stars while simultaneously adjusting for multiple testing (three comparisons)
+wt_results_theta$star<-sigstar(wt_results_theta$p.val,1)
+# plot code
+wtplotpop<-ggplot(methsites_allpops, aes(x = result, y = theta, fill = Population)) +
+  theme_bw()+
+  geom_boxplot(outlier.shape = NA) +
+  labs(x="Methylation difference",y="Watterson's *\U03B8* (chromosome-level)",title = "")+
+  geom_point(pch = 21, position = position_jitterdodge(0.1))+
+  scale_x_discrete(labels=c(paste("Non-DMC\n(n=",nrow(subset(sitesNsamples,result_pop=="non")),")",sep=""),
+                            paste("FW-Hypo\n(n=",nrow(subset(sitesNsamples,result_pop=="hypo")),")",sep=""),
+                            paste("FW-Hyper\n(n=",nrow(subset(sitesNsamples,result_pop=="hyper")),")",sep="")))+
+  annotate(geom='text', label = c(wt_results_theta$star[1],wt_results_theta$star[2],wt_results_theta$star[3]),
+           x = c(1,2,3), y = max(methsites_allpops$theta)*1.15)+
+  annotate(geom='segment',x=c(0.75,1.75,2.75),xend=c(1.25,2.25,3.25),
+           y=max(methsites_allpops$theta)*1.1,yend=max(methsites_allpops$theta)*1.1)+
+  scale_fill_manual(values=c("steelblue4","palegreen"))+
+  theme(axis.title.y = element_markdown())
+```
+Print supplementary figures
+
+```{r}
+# png(filename = "FigureS1_draft_051022.png", width = 4000, height = 2500,res=600)
+# grid.arrange(piplotchrI,tajplotchrI,ncol=2)
+# dev.off()
+# 
+# png(filename = "FigureS2_draft_051022.png", width = 3000, height = 2500,res=600)
+# wtplotpop
+# dev.off()
+```
+
+# FIGURE S3 (FORMERLY FIGURE 3)
+
+This plot is a leviathan, and so the code necessarily is too...
+
+```{r}
+# need to get the numbers of sites to show on the plot
+n_sites<-read.table("n_sites_per_category_chromosome.txt",header=T)
+
+# read in the pi data and format
+steps<-read.table("../03_localenv/pop_DMCs_steps_windows_150422.div")[c(1,4,5:7)]
+colnames(steps)<-c("V1","pi","Population","theta","tajd")
+steps<-separate(data = steps, col = V1, into = c("chr","result_pop","class","step"), sep = "\\_")
+steps$step<-as.numeric(steps$step)
+#steps$pi<-as.numeric(steps$pi);steps$theta<-as.numeric(steps$theta);steps$tajd<-as.numeric(steps$tajd)
+
+steps<-subset(steps,pi!="NaN");steps<-subset(steps,pi!="na") # remove failed Pi estimates
+# remove chromosome/category/result combinations without a complete set of pi estimates
+steps <- steps %>% add_count(chr,class,result_pop);steps<-subset(steps,n==42);steps$n<-NULL
+
+# get median pi for each category/result combination
+steps_median<-steps %>% group_by(result_pop,class,step,Population) %>% summarise(median_pi=median(as.numeric(pi)),
+                                                                               lq_pi=quantile(as.numeric(pi),0.25),
+                                                                               hq_pi=quantile(as.numeric(pi),0.75))
+# create result label variable
+steps_median$result_lab<-ifelse(steps_median$result_pop=="hyper","FW-Hyper",
+                                ifelse(steps_median$result_pop=="hypo","FW-Hypo","Non-DMC"))
+steps_median$result_lab <- factor(steps_median$result_lab,levels=c("Non-DMC","FW-Hypo","FW-Hyper"))
+
+# for the counts
+steps_forcount<-subset(steps,step==0)
+steps_forcount$chr<-ifelse(is.na(steps_forcount$chr),"all",steps_forcount$chr)
+
+# now we want only the counts for the chromosomes for which we have data
+steps_forcount<-merge(steps_forcount[c(1,2,3,6)],n_sites,by=c("result_pop","class","chr"))
+steps_counts<-steps_forcount %>% group_by(result_pop,class,Population) %>% summarise(n=sum(n))
+
+# make data frame for nesting categories
+class0<-data.frame(class=c("allsites","CpGI","nonCpGI","promoter","gene","intergenic","DMR","nonDMR"),
+                class0=c("All","CpG Island","CpG Island","Functional class","Functional class",
+                       "Functional class","Differentially-methylated region","Differentially-methylated region"))
+# add nesting data to the main plotting dataframe
+steps_median<-merge(steps_median,class0,by="class")
+steps_counts<-merge(steps_counts,class0,by="class")
+
+# create category label variable
+class_labs <- data.frame(class=c("allsites","CpGI","nonCpGI","promoter","gene","intergenic","DMR","nonDMR"),
+                   class_lab=c("All sites","CpG island","Non-CpG island","Promoter","Gene Body","Intergenic","DMR","Non-DMR"))
+
+steps_median<-merge(steps_median,class_labs,by="class")
+steps_counts<-merge(steps_counts,class_labs,by="class")
+
+steps_median$class_lab <- factor(steps_median$class_lab,levels=c("All sites","CpG island","Non-CpG island","Promoter","Gene Body","Intergenic","DMR","Non-DMR"))
+steps_counts$class_lab <- factor(steps_counts$class_lab,levels=c("All sites","CpG island","Non-CpG island","Promoter","Gene Body","Intergenic","DMR","Non-DMR"))
+
+# dataframes for n labels
+dat_text_non<-subset(steps_counts,result_pop=="non");dat_text_non$result_lab<-"Non-DMC"
+dat_text_hyper<-subset(steps_counts,result_pop=="hyper");dat_text_hyper$result_lab<-"FW-Hyper"
+dat_text_hypo<-subset(steps_counts,result_pop=="hypo");dat_text_hypo$result_lab<-"FW-Hypo"
+
+# plot code
+# last preppy bits
+pop.labs <- c("Marine", "Freshwater");names(pop.labs) <- c("SRR7470095", "SRR869609")
+legend.title<-"Methylation difference:"
+plot_steps<- ggplot(steps_median, aes(x=step, y=median_pi, lty=result_lab, group=result_lab)) + 
+  theme_bw()+
+  geom_line(size=0.5,alpha=1,aes(col=result_lab))+
+  geom_ribbon(aes(y = median_pi, ymin = lq_pi, ymax = hq_pi, fill = result_lab), alpha = .4) +
+  labs(x = "Distance from focal site (bp)", y = "\U03C0 of 5-bp window\n(chromosome median with interquartile range)", title = "") +
+  scale_colour_manual(values=c("gray33","royalblue3","darkorange3"))+
+  scale_fill_manual(values=c("gray33","royalblue3","darkorange3"))+
+  scale_linetype_manual(values=c("dashed","dotted","solid"))+
+  labs(fill = legend.title,colour=legend.title,lty=legend.title)+
+  theme(legend.position="top")+
+  facet_nested(Population ~ class0+class_lab, labeller = labeller(Population=pop.labs))+
+  theme(strip.background = element_rect(color = "black"))+
+  geom_text(data = dat_text_non, mapping = aes(x = -25, y = max(steps_median$median_pi)*1.15, label = n),size=2.5,colour="gray33")+
+  geom_text(data = dat_text_hypo, mapping = aes(x = 0, y = max(steps_median$median_pi)*1.15, label = n),size=2.5,colour="royalblue3")+
+  geom_text(data = dat_text_hyper, mapping = aes(x = 25, y = max(steps_median$median_pi)*1.15, label = n),size=2.5,colour="darkorange3")
+```
+Print the large figure
+```{r}
+# png(filename = "FigureS3_draft_051022.png", width = 7000, height = 2250,res=500)
+# plot_steps
+# dev.off()
+```
+
+# FIGURE 3: Concerning mean % methylation and its shifts
+
+Histograms of mean % methylation
+
+```{r}
+sitesNsamples<-read.table(gzfile("DMC_data_subsample2_140422.tsv.gz"),header=T)
+
+levels_M<-sitesNsamples[c(1,2,4,9,10,13)];colnames(levels_M)[c(4:5)]<-c("mean","SD");levels_M$Population<-"Marine"
+levels_F<-sitesNsamples[c(1,2,4,11,12,13)];colnames(levels_F)[c(4:5)]<-c("mean","SD");levels_F$Population<-"Freshwater"
+
+meth_levels_long<-rbind(levels_M,levels_F)
+meth_levels_long$result_pop <- factor(meth_levels_long$result_pop,levels=c("non","hypo","hyper"))
+meth_levels_long$Population <- factor(meth_levels_long$Population,levels=c("Marine","Freshwater"))
+
+res.labs <- c("Non-DMC", "FW-Hypo","FW-Hyper")
+names(res.labs) <- c("non", "hypo","hyper")
+
+methlevels_hist<-ggplot(meth_levels_long,aes(x=mean,fill=Population,alpha=Population))+
+  theme_classic()+
+  geom_density()+
+  scale_alpha_manual(values=c(1,0.5),name="Population: ")+
+  labs(x="Mean % methylation",y="Site density",title="A")+
+  facet_wrap(result_pop ~.,scales="free_y", labeller = labeller(result_pop=res.labs))+
+  theme(strip.background = element_rect(color = "black"))+
+  theme(legend.position = "top")+
+  scale_fill_manual(values=c("steelblue4","palegreen"),name="Population: ")+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),
+        strip.background = element_blank(),axis.ticks.y = element_blank())+
+  theme(axis.text.y=element_text(colour="white"))
+
+```
+
+Pi of mean methylation levels
+
+```{r}
+methsites_methbins <- read.table("pop_mean_bins_150422.div",sep="\t")[c(1,4,5:7)]
+methsites_methbins<-separate(data = methsites_methbins, col = V1, into = c("result_pop","mean_binmeth","n_sites"), sep = "\\_")
+
+colnames(methsites_methbins)[c(4:7)]<-c("pi","Population","theta","tajd")
+
+methsites_methbins$mean_binmeth<-as.numeric(methsites_methbins$mean_binmeth)
+methsites_methbins$n_sites<-as.numeric(methsites_methbins$n_sites)
+
+methsites_methbins$result <- factor(methsites_methbins$result,levels=c("non","hypo","hyper"))
+methsites_methbins$Population <- ifelse(methsites_methbins$Population=="SRR7470095","Marine","Freshwater")
+methsites_methbins$Population <- factor(methsites_methbins$Population,levels=c("Marine","Freshwater"))
+
+res.labs <- c("Non-DMC", "FW-Hypo","FW-Hyper")
+names(res.labs) <- c("non", "hypo","hyper")
+
+methsites_methbins_plot<-ggplot(methsites_methbins, aes(x = mean_binmeth, y = pi,shape=Population,fill=Population)) +
+  theme_bw()+
+  labs(x="Rank mean % methylation",y="\U03C0 (rank-level)",title="B")+
+  geom_point(color="black")+
+  scale_shape_manual(values=c(21,24),name="Population: ")+
+  facet_wrap(. ~result, labeller = labeller(result=res.labs),scales="free_y")+
+  theme(legend.position = "bottom")+
+  theme(legend.background = element_rect(colour ="black"))+
+  scale_fill_manual(values=c("steelblue4","palegreen"),name="Population: ")
+
+```
+
+Pi ~ change in mean % methylation
+
+```{r}
+methsites_methdiffbins <- read.table("pop_methdiff_bins_190422.div",sep="\t")[c(1,4,5)]
+
+methsites_methdiffbins<-separate(methsites_methdiffbins,V1,into = c("result_pop","methdiff","n_sites"),sep="_")
+
+colnames(methsites_methdiffbins)[c(4,5)]<-c("pi","pop")
+
+methsites_methdiffbins$pi<-as.numeric(methsites_methdiffbins$pi)
+
+methsites_methdiffbins3<-methsites_methdiffbins
+methsites_methdiffbins3$methdiff<-as.numeric(methsites_methdiffbins3$methdiff)
+methsites_methdiffbins3$n_sites<-as.numeric(methsites_methdiffbins3$n_sites)
+methsites_methdiffbins3$result_pop <- factor(methsites_methdiffbins3$result_pop,levels=c("hypo","hyper"))
+methsites_methdiffbins3$Population<-ifelse(methsites_methdiffbins3$pop=="SRR7470095","Marine","Freshwater")
+methsites_methdiffbins3$Population<-factor(methsites_methdiffbins3$Population,levels=c("Marine","Freshwater"))
+
+piplotpopmethdiffbins<-ggplot(methsites_methdiffbins3, aes(x = methdiff, y = pi,fill=Population,shape=Population)) +
+  labs(x="Rank mean shift in % methylation",y="\U03C0 (rank-level)",title = "B")+
+  geom_point()+
+  theme_bw()+
+  geom_vline(xintercept=c(-15,15),lty="dashed")+
+  scale_shape_manual(values=c(21,24))+
+  theme(legend.position = "none")+
+  # theme(legend.position = c(0.27,0.775))+
+  # theme(legend.background = element_rect(colour ="black"))+
+  # theme(legend.title = element_text(size=10))+
+  scale_fill_manual(values=c("steelblue4","palegreen"))
+```
+
+Change in Pi ~ change in mean % methylation
+
+```{r}
+Marine<-subset(methsites_methdiffbins,pop=="SRR7470095")[c(1:4)];colnames(Marine)[4]<-"pi_M"
+FW<-subset(methsites_methdiffbins,pop=="SRR869609")[c(1:4)];colnames(FW)[4]<-"pi_FW"
+methsites_methdiffbins2<-merge(Marine,FW,by=c("result_pop","methdiff","n_sites"),all.x=FALSE)
+methsites_methdiffbins2$methdiff<-as.numeric(methsites_methdiffbins2$methdiff)
+methsites_methdiffbins2$n_sites<-as.numeric(methsites_methdiffbins2$n_sites)
+
+methsites_methdiffbins2$pidiff<-methsites_methdiffbins2$pi_FW-methsites_methdiffbins2$pi_M
+
+methsites_methdiffbins2$result_pop <- factor(methsites_methdiffbins2$result_pop,levels=c("hypo","hyper"))
+
+piplotpopmethdiffbins2<-ggplot(methsites_methdiffbins2, aes(x = methdiff, y = pidiff,fill=result_pop,shape=result_pop)) +
+  labs(x="Rank mean shift in % methylation",y="Change in \U03C0 (rank-level)",title = "C")+
+  geom_point(pch=21,fill="white")+
+  theme_bw()+
+  geom_hline(yintercept=0,lty="dashed")+
+  geom_vline(xintercept=c(-15,15),lty="dashed")+
+  annotate(geom="text",x=c(0,0),y=c(0.01,-0.035),label=c(paste(sprintf('\u2191'),"\nhigher pi\nin FW"),
+                                                         paste("lower pi\nin FW\n",sprintf('\u2193'))),size=3)+
+  annotate(geom="text",x=c(-40,40),y=-0.035,label=c(paste(sprintf('\u2190'),"FW-Hypo"),
+                                                   paste("FW-Hyper",sprintf('\u2192'))),size=3)+
+  theme(legend.position = "none")
+```
+
+FST ~ change in mean % methylation
+
+```{r}
+methsites_methdiffbinsfst<-read.table("WS_MAS_pop_methdiff_bins.fstlite")
+methsites_methdiffbinsfst<-separate(methsites_methdiffbinsfst,V1,into=c("result_pop","methdiff","n_sites"),sep="_")
+methsites_methdiffbinsfst$methdiff<-as.numeric(methsites_methdiffbinsfst$methdiff)
+methsites_methdiffbinsfst$n_sites<-as.numeric(methsites_methdiffbinsfst$n_sites)
+
+methsites_methdiffbinsfst$result_pop <- factor(methsites_methdiffbinsfst$result_pop,levels=c("hypo","hyper"))
+
+fstplotpopmethdiffbins<-ggplot(methsites_methdiffbinsfst, aes(x = methdiff, y = V2,fill=result_pop,shape=result_pop)) +
+  labs(x="Rank mean shift in % methylation",y="Fst (rank-level)",title = "D")+
+  geom_point(pch=21,fill="white")+
+  theme_bw()+
+  geom_vline(xintercept=c(-15,15),lty="dashed")+
+  theme(legend.position = "none")
+```
+
+Print composite figure
+
+
+```{r}
+# lay1 <- rbind(c(1,1,1),
+#               c(1,1,1),
+#               c(1,1,1),
+#               c(1,1,1),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(3,4,5),
+#               c(3,4,5),
+#               c(3,4,5),
+#               c(3,4,5),
+#               c(3,4,5))
+# grobz1 <- lapply(list(methlevels_hist,methsites_methbins_plot,
+#                       piplotpopmethdiffbins,piplotpopmethdiffbins2,
+#                       fstplotpopmethdiffbins), ggplotGrob)
+# 
+# png(filename = "Figure3_draft_051022.png", width = 5500, height = 5500,res=600)
+# grid.arrange(grobs = grobz1, layout_matrix = lay1)
+# dev.off()
+```
+
+# FIGURE 4: Concerning SD of % methylation and its shifts
+
+Histograms of SD of methylation
+
+```{r}
+sitesNsamples<-read.table(gzfile("DMC_data_subsample2_140422.tsv.gz"),header=T)
+
+levels_M<-sitesNsamples[c(1,2,4,9,10,13)];colnames(levels_M)[c(4:5)]<-c("mean","SD");levels_M$Population<-"Marine"
+levels_F<-sitesNsamples[c(1,2,4,11,12,13)];colnames(levels_F)[c(4:5)]<-c("mean","SD");levels_F$Population<-"Freshwater"
+
+meth_levels_long<-rbind(levels_M,levels_F)
+meth_levels_long$result_pop <- factor(meth_levels_long$result_pop,levels=c("non","hypo","hyper"))
+meth_levels_long$Population <- factor(meth_levels_long$Population,levels=c("Marine","Freshwater"))
+
+res.labs <- c("Non-DMC", "FW-Hypo","FW-Hyper")
+names(res.labs) <- c("non", "hypo","hyper")
+
+methSDs_hist<-ggplot(meth_levels_long,aes(x=SD,fill=Population,alpha=Population))+
+  theme_classic()+
+  geom_density()+
+  scale_alpha_manual(values=c(1,0.5),name="Population: ")+
+  labs(x="SD of % methylation",y="Density",title="A")+
+  facet_wrap(result_pop ~.,scales="free_y", labeller = labeller(result_pop=res.labs))+
+  theme(strip.background = element_rect(color = "black"))+
+  theme(legend.position = "top")+
+  scale_fill_manual(values=c("steelblue4","palegreen"),name="Population: ")+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),
+        strip.background = element_blank(),axis.ticks.y = element_blank())+
+  theme(axis.text.y=element_text(colour="white"))
+```
+
+Pi ~ SD of methylation:
+
+```{r}
+methsites_SDbins <- read.table("pop_SD_bins_150422.div",sep="\t")[c(1,4,5:7)]
+methsites_SDbins<-separate(data = methsites_SDbins, col = V1, into = c("result_pop","mean_binSD","n_sites"), sep = "\\_")
+
+colnames(methsites_SDbins)[c(4:7)]<-c("pi","Population","theta","tajd")
+
+methsites_SDbins$mean_binSD<-as.numeric(methsites_SDbins$mean_binSD)
+
+methsites_SDbins$result <- factor(methsites_SDbins$result,levels=c("non","hypo","hyper"))
+methsites_SDbins$Population <- ifelse(methsites_SDbins$Population=="SRR7470095","Marine","Freshwater")
+methsites_SDbins$Population <- factor(methsites_SDbins$Population,levels=c("Marine","Freshwater"))
+
+res.labs <- c("Non-DMC", "FW-Hypo","FW-Hyper")
+names(res.labs) <- c("non", "hypo","hyper")
+
+methsites_SDbins_plot<-ggplot(methsites_SDbins, aes(x = mean_binSD, y = pi,shape=Population,fill=Population)) +
+  theme_bw()+
+  labs(x="Rank mean SD of % methylation",y="\U03C0 (rank-level)",title="B")+
+  geom_point()+
+  scale_shape_manual(values=c(21,24),name="Population: ")+
+  facet_wrap(. ~result, labeller = labeller(result=res.labs),scales="free_y")+
+  theme(legend.position = "bottom")+
+  theme(legend.background = element_rect(colour ="black"))+
+  scale_fill_manual(values=c("steelblue4","palegreen"),name="Population: ")
+```
+
+Pi ~ Change in SD
+
+```{r}
+methsites_SDSbins <- read.table("pop_SDS_bins_190422.div",sep="\t")[c(1,4,5)]
+
+methsites_SDSbins<-separate(methsites_SDSbins,V1,into = c("result_pop","SDS","n_sites"),sep="_")
+methsites_SDSbins<-subset(methsites_SDSbins,result_pop!="non")
+
+colnames(methsites_SDSbins)[c(4,5)]<-c("pi","pop")
+
+methsites_SDSbins$pi<-as.numeric(methsites_SDSbins$pi)
+
+methsites_SDSbins3<-methsites_SDSbins
+methsites_SDSbins3$SDS<-as.numeric(methsites_SDSbins3$SDS)
+methsites_SDSbins3$n_sites<-as.numeric(methsites_SDSbins3$n_sites)
+
+methsites_SDSbins3$result_pop <- factor(methsites_SDSbins3$result_pop,levels=c("hypo","hyper"))
+
+res.labs <- c("FW-Hypo", "FW-Hyper")
+names(res.labs) <- c("hypo", "hyper")
+piplotpopSDSbins<-ggplot(methsites_SDSbins3, aes(x = SDS, y = pi,fill=pop,shape=pop)) +
+  labs(x="Rank mean shift in SD of % methylation",y="\U03C0 (rank-level)",title = "C")+
+  geom_point()+
+  theme_bw()+
+  geom_vline(xintercept=0,lty="dashed")+
+  scale_shape_manual(values=c(21,24))+
+  facet_grid(result_pop ~ ., scales = "fixed",labeller=labeller(result_pop=res.labs))+
+  theme(legend.position = "none")+
+  scale_fill_manual(values=c("steelblue4","palegreen"))
+```
+
+Change in pi ~ change in SD
+
+```{r}
+Marine<-subset(methsites_SDSbins,pop=="SRR7470095")[c(1:4)];colnames(Marine)[4]<-"pi_M"
+FW<-subset(methsites_SDSbins,pop=="SRR869609")[c(1:4)];colnames(FW)[4]<-"pi_FW"
+methsites_SDSbins2<-merge(Marine,FW,by=c("result_pop","SDS","n_sites"),all.x=FALSE)
+methsites_SDSbins2$SDS<-as.numeric(methsites_SDSbins2$SDS)
+methsites_SDSbins2$n_sites<-as.numeric(methsites_SDSbins2$n_sites)
+
+methsites_SDSbins2$pidiff<-methsites_SDSbins2$pi_FW-methsites_SDSbins2$pi_M
+
+methsites_SDSbins2$result_pop <- factor(methsites_SDSbins2$result_pop,levels=c("hypo","hyper"))
+
+annotation<-data.frame(result_pop=c("hypo","hyper","hypo","hyper"),label=c(paste(sprintf('\u2191'),"higher pi\nin FW"),
+                                                           paste("lower pi\nin FW",sprintf('\u2193')),
+                                                           paste("higher SD\nin FW",sprintf('\u2192')),
+                                                           paste(sprintf('\u2190'),"lower SD\nin FW")),
+                       pop=rep("SRR869609",4))
+annotation$result_pop<-factor(annotation$result_pop,levels=c("hypo","hyper"))
+
+
+res.labs <- c("FW-Hypo", "FW-Hyper")
+names(res.labs) <- c("hypo", "hyper")
+piplotpopSDSbins2<-ggplot(methsites_SDSbins2, aes(x = SDS, y = pidiff,fill=result_pop)) +
+  labs(x="Rank mean shift in SD of % methylation",y="Change in \U03C0 (rank-level)",title="D")+
+  geom_point(pch=21,fill="white")+
+  theme_bw()+
+  geom_hline(yintercept=0,lty="dashed")+
+  geom_vline(xintercept=0,lty="dashed")+
+  #scale_shape_manual(values=c(21,24))+
+  facet_grid(result_pop ~ ., scales = "fixed",labeller=labeller(result_pop=res.labs))+
+  theme(legend.position = "none")+
+  geom_text(data=annotation,aes(label=label,y=c(0.03,-0.04,-0.04,0.03),x=c(-15,30,30,-15)),vjust="inward",size=3)
+```
+
+FST ~ change in SD
+
+```{r}
+methsites_SDSbinsfst<-read.table("WS_MAS_pop_SDS_bins.fstlite")
+
+methsites_SDSbinsfst<-separate(methsites_SDSbinsfst,V1,into=c("result_pop","SDS","n_sites"),sep="_")
+methsites_SDSbinsfst$SDS<-as.numeric(methsites_SDSbinsfst$SDS)
+methsites_SDSbinsfst$n_sites<-as.numeric(methsites_SDSbinsfst$n_sites)
+methsites_SDSbinsfst<-subset(methsites_SDSbinsfst,result_pop!="non")
+
+methsites_SDSbinsfst$result_pop <- factor(methsites_SDSbinsfst$result_pop,levels=c("hypo","hyper"))
+
+res.labs <- c("FW-Hypo", "FW-Hyper")
+names(res.labs) <- c("hypo", "hyper")
+fstplotpopSDSbins<-ggplot(methsites_SDSbinsfst, aes(x = SDS, y = V2,fill=result_pop)) +
+  labs(x="Rank mean shift in SD of % methylation",y="Fst (rank-level)",title = "E")+
+  geom_point(pch=21,fill="white")+
+  theme_bw()+
+  geom_vline(xintercept=0,lty="dashed")+
+  scale_fill_manual(values=c("royalblue3","darkorange3"))+
+  facet_grid(result_pop ~ ., scales = "fixed",space="free",labeller=labeller(result_pop=res.labs))+
+  theme(legend.position = "none")
+```
+
+Print composite figure
+
+```{r}
+# lay2 <- rbind(c(1,1,1),
+#               c(1,1,1),
+#               c(1,1,1),
+#               c(1,1,1),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(2,2,2),
+#               c(3,4,5),
+#               c(3,4,5),
+#               c(3,4,5),
+#               c(3,4,5),
+#               c(3,4,5))
+# grobz2 <- lapply(list(methSDs_hist,methsites_SDbins_plot,piplotpopSDSbins,piplotpopSDSbins2,fstplotpopSDSbins), ggplotGrob)
+# 
+# png(filename = "Figure4_draft_051022.png", width = 5500, height = 5500,res=600)
+# grid.arrange(grobs = grobz2, layout_matrix = lay2)
+# dev.off()
+
+```
+
+# FIGURE 5: methylation site inducibility
+
+A plot of how many sites are induced in each population.
+
+```{r}
+sitesNsamples<-read.table(gzfile("DMC_data_subsample2_140422.tsv.gz"),header=T)
+
+induc_M2<-sitesNsamples[c(1,4,6)];colnames(induc_M2)[3]<-"result_exp";induc_M2$Population<-"Marine"
+induc_F2<-sitesNsamples[c(1,4,8)];colnames(induc_F2)[3]<-"result_exp";induc_F2$Population<-"Freshwater"
+meth_induc_long2<-rbind(induc_M2,induc_F2)
+meth_induc_long2$induced<-ifelse(meth_induc_long2$result_exp=="non","no","yes")
+
+n_induced<-meth_induc_long2 %>% group_by(chr, result_pop, Population, induced) %>% tally()
+n_sites  <-meth_induc_long2 %>% group_by(chr, result_pop, Population         ) %>% tally()
+
+n_induced<-merge(n_induced,n_sites,by=c("chr","result_pop","Population"))
+n_induced<-subset(n_induced,induced=="yes")
+n_induced$per_induced<-(n_induced$n.x/n_induced$n.y)*100
+
+n_induced$result_pop <- factor(n_induced$result_pop,levels=c("non","hypo","hyper"))
+n_induced$Population <- factor(n_induced$Population,levels=c("Marine","Freshwater"))
+
+# Wilcoxon tests
+wt_results_induc<-NULL
+for (i in c("non","hypo","hyper")){
+  wt<-wilcox.test(subset(n_induced,result_pop==i&Population=="Marine")$per_induced,
+            subset(n_induced,result_pop==i&Population=="Freshwater")$per_induced,
+            paired = TRUE, alternative = "two.sided")
+  wt_results_induc0<-data.frame(V=wt$statistic,p.val=wt$p.value,meth_result=i)
+  wt_results_induc<-rbind(wt_results_induc,wt_results_induc0)}
+# compute significance stars
+wt_results_induc$star<-sigstar(wt_results_induc$p.val,1)
+
+ninducplotpop<-ggplot(n_induced, aes(x = result_pop, y = per_induced, fill = Population)) +
+  theme_bw()+
+  geom_boxplot(outlier.shape = NA) +
+  labs(x="Inter-population methylation difference",y="% of sites induced by salinity change",title = "B")+
+  geom_point(pch = 21, position = position_jitterdodge(0.1))+
+  scale_x_discrete(labels=c(paste("Non-DMC\n(n=",nrow(subset(sitesNsamples,result_pop=="non")),")",sep=""),
+                            paste("FW-Hypo\n(n=",nrow(subset(sitesNsamples,result_pop=="hypo")),")",sep=""),
+                            paste("FW-Hyper\n(n=",nrow(subset(sitesNsamples,result_pop=="hyper")),")",sep="")))+
+  annotate(geom='text', label = c(wt_results_induc$star[1],wt_results_induc$star[2],wt_results_induc$star[3]),
+           x = c(1,2,3), y = max(n_induced$per_induced)*1.15)+
+  annotate(geom='segment',x=c(0.75,1.75,2.75),xend=c(1.25,2.25,3.25),
+           y=max(n_induced$per_induced)*1.1,yend=max(n_induced$per_induced)*1.1)+
+  scale_fill_manual(values=c("steelblue4","palegreen"))+
+  theme(legend.position="bottom")+
+  theme(legend.background = element_rect(colour ="black"))
+```
+
+By-chromosome plot of pi
+
+```{r}
+# get counts per category (we will add these to the plot)
+methsites_allpops_ind <- read.table("pop_induc_150422.div",sep="\t")[c(1,4:7)]
+methsites_allpops_ind_excl <- read.table("pop_induc_excl_200422.div",sep="\t")[c(1,4:7)]
+methsites_allpops_ind<-rbind(methsites_allpops_ind,methsites_allpops_ind_excl)
+methsites_allpops_ind<-separate(methsites_allpops_ind,V1,into = c("chr","result","inducible","n_sites"),sep="_")
+
+colnames(methsites_allpops_ind)<-c("chr","result","inducible","n_sites","pi","pop","theta","tajd")
+
+methsites_allpops_ind$inducible <- factor(methsites_allpops_ind$inducible,levels=c("noninduced","induced","MarineOnly","FWonly"))
+methsites_allpops_ind$Population<-ifelse(methsites_allpops_ind$pop=="SRR7470095","Marine","Freshwater")
+methsites_allpops_ind$Population <- factor(methsites_allpops_ind$Population,levels=c("Marine","Freshwater"))
+methsites_allpops_ind$pi<-as.numeric(methsites_allpops_ind$pi)
+
+methsites_allpops_ind$n_sites<-as.numeric(methsites_allpops_ind$n_sites)
+site_counts_ind<-methsites_allpops_ind %>% group_by(result,Population,inducible) %>% summarise(n_sites_allchr=sum(n_sites))
+methsites_allpops_ind<-merge(methsites_allpops_ind,site_counts_ind,by=c("result","Population","inducible"))
+
+methsites_allpops_ind$xlabel<-ifelse(methsites_allpops_ind$inducible=="induced","Induced -\neither pop.",
+                                     ifelse(methsites_allpops_ind$inducible=="noninduced","Not induced",
+                                            ifelse(methsites_allpops_ind$inducible=="MarineOnly","Induced -\nMarine only","Induced -\nFW only")))
+methsites_allpops_ind$xlabel<-paste(methsites_allpops_ind$xlabel,"\n(n = ",methsites_allpops_ind$n_sites_allchr,")",sep="")
+methsites_allpops_ind<-methsites_allpops_ind[c(1:4,6,11)]
+
+# concatenate non-DMC data
+methsites_allpops <- read.table("pop_DMCs_150422.div",sep="\t")
+methsites_allpops<-separate(methsites_allpops,V1,into = c("chr","result"),sep="_")
+colnames(methsites_allpops)<-c("chr","result","n_SNPs","cov","pi","pop","theta","tajd")
+methsites_allpops$result <- factor(methsites_allpops$result,levels=c("non","hypo","hyper"))
+methsites_allpops$Population<-ifelse(methsites_allpops$pop=="SRR7470095","Marine","Freshwater")
+methsites_allpops<-subset(methsites_allpops,result=="non")[c(1,2,5,9)]
+methsites_allpops$inducible<-"N/A"
+methsites_allpops$xlabel<-"N/A"
+methsites_allpops_ind<-rbind(methsites_allpops_ind,methsites_allpops)
+
+methsites_allpops_ind$xlabel<-factor(methsites_allpops_ind$xlabel,levels=c("N/A",
+  "Not induced\n(n = 81405)","Induced -\neither pop.\n(n = 10765)","Induced -\nMarine only\n(n = 3647)","Induced -\nFW only\n(n = 5332)",
+  "Not induced\n(n = 8994)", "Induced -\neither pop.\n(n = 6063)", "Induced -\nMarine only\n(n = 3163)", "Induced -\nFW only\n(n = 1996)"))
+methsites_allpops_ind$result <- factor(methsites_allpops_ind$result,levels=c("non","hypo","hyper"))
+
+# plot
+
+# A data frame with labels for each facet
+test_results_ind<-NULL
+for (i in c("hypo","hyper")){
+  temp<-NULL
+  for (j in c("noninduced","induced","MarineOnly","FWonly")){
+shap_ind<-shapiro.test(subset(methsites_allpops_ind,result==i&Population=="Marine"&inducible==j)$pi-
+            subset(methsites_allpops_ind,result==i&Population=="Freshwater"&inducible==j)$pi)
+  t_ind<-t.test(subset(methsites_allpops_ind,result==i&Population=="Marine"&inducible==j)$pi,
+            subset(methsites_allpops_ind,result==i&Population=="Freshwater"&inducible==j)$pi,
+            paired = TRUE, alternative = "two.sided")
+  temp_ind<-data.frame(inducible=j,shapiro.p=shap_ind$p.value,result=i,p.val=t_ind$p.value)
+  temp<-rbind(temp,temp_ind)}
+  test_results_ind<-rbind(test_results_ind,temp)}
+  test_results_ind$star<-sigstar(test_results_ind$p.val,1)
+
+ann_text<-test_results_ind[c(1,3,5)];ann_text$Population<-"Marine"
+ann_text$inducible <- factor(ann_text$inducible,levels=c("noninduced","induced","MarineOnly","FWonly"))
+ann_text$result <- factor(ann_text$result,levels=c("non","hypo","hyper"))
+ann_text$xlabel<-levels(methsites_allpops_ind$xlabel)[c(4,2,3,1)]
+
+# segment annotation data
+data.segm<-data.frame(x=rep(c(0.75,1.75,2.75,3.75),2),y=max(methsites_allpops_ind$pi)*1.05,
+                      xend=rep(c(1.25,2.25,3.25,4.25),2),yend=max(methsites_allpops_ind$pi)*1.05,
+                      result=c(rep("hypo",4),rep("hyper",4)))
+data.segm$result <- factor(data.segm$result,levels=c("non","hypo","hyper"))
+
+# plot
+res.labs <- c("Non-DMC","FW-Hypo", "FW-Hyper")
+names(res.labs) <- c("non","hypo", "hyper")
+piplotpopind<-ggplot(methsites_allpops_ind, aes(x = xlabel, y = pi, fill = Population)) +
+  theme_bw()+
+  geom_boxplot(outlier.shape = NA) +
+  labs(x="Category of salinity-induced methylation change",y="\U03C0 (chromosome-level)",title = "C")+
+  geom_point(pch = 21, position = position_jitterdodge(0.1))+
+  facet_grid(. ~ result, scales = "free",space="free", labeller = labeller(result=res.labs))+
+  geom_segment(data=data.segm,
+               aes(x=x,y=y,yend=yend,xend=xend),inherit.aes=FALSE)+
+  geom_text(data = ann_text,aes(label = star,x=c(1,2,3,4,1,2,3,4),y=max(methsites_allpops_ind$pi)*1.15),vjust="inward")+
+  scale_fill_manual(values=c("steelblue4","palegreen"),name="Population: ")+
+  theme(legend.position="none")+
+  theme(legend.background = element_rect(colour ="black"))
+
+# SOME MORE NECESSARY STATISTICAL TESTS
+# This is so that we can say that in all cases, induced sites had higher pi than non-induced sites
+lm_ind<-lm(pi~inducible*Population*result,data=subset(methsites_allpops_ind,result!="non"))
+lm_ind_emmeans<-emmeans(lm_ind,specs = trt.vs.ctrl ~ inducible|Population:result)
+# poss also some interesting interactions to be explored in the model summary.
+
+```
+
+By-chromosome plot of Fst
+
+```{r}
+fst_allpops_ind <- read.table("WS_MAS_pop_induc.fstlite",sep="\t")
+fst_allpops_ind_excl <- read.table("WS_MAS_induc_excl.fstlite",sep="\t")
+fst_allpops_ind<-rbind(fst_allpops_ind,fst_allpops_ind_excl)
+fst_allpops_ind<-separate(fst_allpops_ind,V1,into = c("chr","result","inducible","n_sites"),sep="_")
+colnames(fst_allpops_ind)<-c("chr","result","inducible","n_sites","fst")
+fst_allpops_ind$inducible <- factor(fst_allpops_ind$inducible,levels=c("noninduced","induced","MarineOnly","FWonly"))
+fst_allpops_ind$n_sites<-NULL
+fst_allpops_ind$xlabel<-ifelse(fst_allpops_ind$inducible=="induced","Induced -\neither pop.",
+                                     ifelse(fst_allpops_ind$inducible=="noninduced","Not induced",
+                                            ifelse(fst_allpops_ind$inducible=="MarineOnly","Induced -\nMarine only","Induced -\nFW only")))
+
+fst_allpops <- read.table("WS_MAS_pop_DMCs.fstlite",sep="\t")
+fst_allpops<-separate(fst_allpops,V1,into = c("chr","result"),sep="_")
+colnames(fst_allpops)<-c("chr","result","fst")
+fst_allpops$inducible<-"N/A"
+fst_allpops$xlabel<-"N/A"
+fst_allpops_ind<-rbind(fst_allpops_ind,subset(fst_allpops,result=="non"))
+
+fst_allpops_ind$xlabel<-factor(fst_allpops_ind$xlabel,levels=c("N/A",
+  "Not induced","Induced -\neither pop.","Induced -\nMarine only","Induced -\nFW only"))
+fst_allpops_ind$result <- factor(fst_allpops_ind$result,levels=c("non","hypo","hyper"))
+
+# Shapiro tests for normality
+shapiro.test(subset(fst_allpops_ind,inducible=="noninduced"&result=="hypo")$fst)
+shapiro.test(subset(fst_allpops_ind,inducible=="induced"&result=="hypo")$fst)
+shapiro.test(subset(fst_allpops_ind,inducible=="FWonly"&result=="hypo")$fst)
+shapiro.test(subset(fst_allpops_ind,inducible=="noninduced"&result=="hyper")$fst)
+shapiro.test(subset(fst_allpops_ind,inducible=="induced"&result=="hyper")$fst) # not normal
+shapiro.test(subset(fst_allpops_ind,inducible=="FWonly"&result=="hyper")$fst)
+
+# As one of the distributions is not normally distributed, we use wilcoxon tests
+wt1<-wilcox.test(fst~inducible,data=subset(fst_allpops_ind,(inducible=="noninduced"|inducible=="induced")&result=="hypo"))
+wt2<-wilcox.test(fst~inducible,data=subset(fst_allpops_ind,(inducible=="noninduced"|inducible=="FWonly")&result=="hypo"))
+wt3<-wilcox.test(fst~inducible,data=subset(fst_allpops_ind,(inducible=="noninduced"|inducible=="induced")&result=="hyper"))
+wt4<-wilcox.test(fst~inducible,data=subset(fst_allpops_ind,(inducible=="noninduced"|inducible=="FWonly")&result=="hyper"))
+
+# setup plot data
+data.segm<-data.frame(x=rep(c(1,1),2),y=rep(c(max(fst_allpops_ind$fst)*1.05,max(fst_allpops_ind$fst)*1.15),2),
+                      xend=rep(c(2,4),2),yend=rep(c(max(fst_allpops_ind$fst)*1.05,max(fst_allpops_ind$fst)*1.15),2),
+                      result=c(rep("hypo",4),rep("hyper",4)))
+data.segm$result <- factor(data.segm$result,levels=c("non","hypo","hyper"))
+
+ann_text<-data.frame(star=c(sigstar(wt1$p.value,2),sigstar(wt2$p.value,2),sigstar(wt3$p.value,2),sigstar(wt4$p.value,2)),
+                     result=c(rep("hypo",2),rep("hyper",2)),
+                     x=c(1.5,2.5,1.5,2.5),y=rep(c(max(fst_allpops_ind$fst)*1.1,max(fst_allpops_ind$fst)*1.2),2))
+ann_text$result <- factor(ann_text$result,levels=c("non","hypo","hyper"))
+
+res.labs <- c("Non-DMC","FW-Hypomethylated", "FW-Hypermethylated")
+names(res.labs) <- c("non","hypo", "hyper")
+
+# plot code
+fstplotpopind<-ggplot(fst_allpops_ind, aes(x = xlabel, y = fst)) +
+  theme_bw()+
+  geom_boxplot(outlier.shape = NA,fill="white") +
+  labs(x="Category of salinity-induced methylation change",y="Fst (chromosome-level)",title = "E")+
+  geom_point(pch = 21, position = position_jitter(0.1),fill="white")+
+  facet_grid(. ~ result, scales = "free",space="free", labeller = labeller(result=res.labs))+
+  geom_segment(data=data.segm,
+               aes(x=x,y=y,yend=yend,xend=xend),inherit.aes=FALSE)+
+  geom_text(data = ann_text,aes(label = star,x=x,y=y,vjust="inward"))
+
+```
+
+pi ~ ranks of induced methylation change
+
+```{r}
+methsites_indbins <- read.table("pop_induc_bins_190422.div",sep="\t")[c(1,4,5)]
+methsites_indbins<-separate(methsites_indbins,V1,into = c("inducibility","n_sites"),sep="_")
+colnames(methsites_indbins)[c(3,4)]<-c("pi","pop")
+methsites_indbins$pi<-as.numeric(methsites_indbins$pi)
+methsites_indbins$inducibility<-as.numeric(methsites_indbins$inducibility)
+methsites_indbins$n_sites<-as.numeric(methsites_indbins$n_sites)
+
+methsites_indbins$Population<-ifelse(methsites_indbins$pop=="SRR7470095","Marine","Freshwater")
+methsites_indbins$Population <- factor(methsites_indbins$Population,levels=c("Marine","Freshwater"))
+
+piplotpopindbins<-ggplot(methsites_indbins, aes(x = inducibility, y = pi, fill = Population,shape=Population,color=Population)) +
+  labs(x="Mean absolute salinity-induced\nmethylation change (%)",y="\U03C0 (rank-level)",title = "D")+
+  geom_smooth(method=lm,se=TRUE)+
+  theme_bw()+
+  scale_shape_manual(values=c(21,24),name="Population: ")+
+  theme(legend.position = c(0.8,0.2))+
+  theme(legend.background = element_rect(colour ="black"))+
+  scale_fill_manual(values=c("steelblue4","palegreen"),name="Population: ")+
+  scale_color_manual(values=c("steelblue4","palegreen"),name="Population: ")+
+  geom_point(color="black")
+
+# models
+pi_indbin_mod<-lm(pi~inducibility*Population,data=methsites_indbins)
+anova(pi_indbin_mod)
+pi_indbin_modM<-lm(pi~inducibility,data=subset(methsites_indbins,Population=="Marine"))
+summary(pi_indbin_modM)
+pi_indbin_modF<-lm(pi~inducibility,data=subset(methsites_indbins,Population=="Freshwater"))
+summary(pi_indbin_modF)
+
+
+```
+
+Fst ~ ranks of induced methylation change
+
+```{r}
+fst_indbins0 <- read.table("WS_MAS_pop_induc_bins_SRR7470095.fstlite",sep="\t");fst_indbins0$Population<-"Marine"
+fst_indbins1 <- read.table("WS_MAS_pop_induc_bins_SRR869609.fstlite",sep="\t");fst_indbins1$Population<-"Freshwater"
+fst_indbins<-rbind(fst_indbins0,fst_indbins1)
+
+fst_indbins<-separate(fst_indbins,V1,into = c("inducibility","n_sites"),sep="_")
+colnames(fst_indbins)[c(3)]<-c("fst")
+
+head(fst_indbins)
+
+fst_indbins$fst<-as.numeric(fst_indbins$fst)
+fst_indbins$inducibility<-as.numeric(fst_indbins$inducibility)
+fst_indbins$n_sites<-as.numeric(fst_indbins$n_sites)
+
+fst_indbins$Population <- factor(fst_indbins$Population,levels=c("Marine","Freshwater"))
+
+fstplotpopindbins<-ggplot(fst_indbins, aes(x = inducibility, y = fst, fill = Population,shape=Population,color=Population)) +
+  labs(x="Mean absolute salinity-induced\nmethylation change (%)",y="Fst (rank-level)",title = "F")+
+  theme_bw()+
+  geom_smooth(method=lm,se=TRUE)+
+  scale_shape_manual(values=c(21,24))+
+  #theme(legend.position = c(0.8,0.2))+
+  theme(legend.position = "none")+
+  #theme(legend.background = element_rect(colour ="black"))+
+  scale_fill_manual(values=c("steelblue4","palegreen"))+
+  scale_color_manual(values=c("steelblue4","palegreen"))+
+  geom_point(color="black")
+
+# models
+fst_indbin_mod<-lm(fst~inducibility*Population,data=fst_indbins)
+anova(fst_indbin_mod)
+fst_indbin_modM<-lm(fst~inducibility,data=subset(fst_indbins,Population=="Marine"))
+summary(fst_indbin_modM)
+fst_indbin_modF<-lm(fst~inducibility,data=subset(fst_indbins,Population=="Freshwater"))
+summary(fst_indbin_modF)
+
+```
+
+Print figure 5
+
+```{r}
+
+# # make blank panel
+# blankplot<-ggplot()+
+#   theme_minimal()+
+#   labs(title="A")
+# 
+# lay <- rbind(c(1,1,1,1,2,2),
+#              c(1,1,1,1,2,2),
+#              c(1,1,1,1,2,2),
+#              c(1,1,1,1,2,2),
+#              c(1,1,1,1,2,2),
+#              c(1,1,1,1,2,2),
+#              c(1,1,1,1,2,2),
+#              c(1,1,1,1,2,2),
+#              c(1,1,1,1,2,2),
+#              c(3,3,3,3,4,4),
+#              c(3,3,3,3,4,4),
+#              c(3,3,3,3,4,4),
+#              c(3,3,3,3,4,4),
+#              c(3,3,3,3,4,4),
+#              c(3,3,3,3,4,4),
+#              c(3,3,3,3,4,4),
+#              c(3,3,3,3,4,4),
+#              c(5,5,5,5,6,6),
+#              c(5,5,5,5,6,6),
+#              c(5,5,5,5,6,6),
+#              c(5,5,5,5,6,6),
+#              c(5,5,5,5,6,6),
+#              c(5,5,5,5,6,6),
+#              c(5,5,5,5,6,6),
+#              c(5,5,5,5,6,6))
+# grobz <- lapply(list(blankplot,ninducplotpop,piplotpopind,piplotpopindbins,fstplotpopind,fstplotpopindbins), ggplotGrob)
+# 
+# png(filename = "Figure5_draft_051022.png", width = 6000, height = 6200,res=500)
+# grid.arrange(grobs = grobz, layout_matrix = lay)
+# dev.off()
+```
+
+END

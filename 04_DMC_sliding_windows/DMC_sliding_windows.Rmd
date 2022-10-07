@@ -1,0 +1,221 @@
+---
+title: Nucleotide diversity of the local environment around differentially methylated
+  CpG sites
+author: "James Ord"
+date: "4/8/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# PACKAGES
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(matrixStats)
+library(forcats)
+library(data.table)
+
+# FUNCTIONS
+
+`%not_in%` = Negate(`%in%`)
+
+# NOTE: it is possible to set the window size to 1 if we do not want windows
+writeGTF_SiteClass_windows <- function(input,distance,stepsize,windowsize,output) {
+  if (distance %% stepsize != 0) stop("Error: distance must be a multiple of step size")
+  if (windowsize %% 2 ==0) stop("Error: window size must be an odd number")
+  sitedata<-input
+  windows_for_gtf<-NULL
+  for (i in seq(from= -distance,to= distance,by= stepsize)){
+    temp<-sitedata
+    temp$centre<-temp$start+i
+    temp$start<-temp$centre-((windowsize-1)/2)
+    temp$end<-temp$centre+((windowsize-1)/2)
+    temp$cat<-paste(temp$cat,i,sep="_")
+    temp$centre<-NULL
+    temp<-temp[c(1,2,4,3)]
+    windows_for_gtf<-rbind(windows_for_gtf,temp)
+  }
+  sitedata<-windows_for_gtf
+  sitedata$source<-"none"
+  sitedata$feature<-"transcript"
+  sitedata$score<-"."
+  sitedata$strand<-"."
+  sitedata$frame<-"."
+  sitedata$gene_id<-paste("\"",sitedata[,4],"\"",sep="")
+  sitedata$attribute<-paste("gene_id ",sitedata$gene_id,";",sep="")
+  GTF<-data.frame(seqname=sitedata[,1],
+                source=sitedata$source,
+                feature=sitedata$feature,
+                start=sitedata[,2],
+                end=sitedata[,3],
+                score=sitedata$score,
+                strand=sitedata$strand,
+                frame=sitedata$frame,
+                attribute=sitedata$attribute)
+  write.table(GTF,file=output,quote=FALSE,col.names=FALSE,row.names=FALSE,sep="\t")
+}
+```
+
+Here, we will annotate the sites file with various genomic features.
+We will then write a large gtf file with steps around each site, distinguishing the various genomic feature categories.
+
+First we read in the results file (including subsample of non-DMCs) that was made in step 1
+```{r}
+sitesNsamples<-read.table(gzfile("DMC_data_subsample_110422.tsv.gz"),header=T)
+```
+
+We also need to identify which sites fall within genes, promoters, cpg islands, and DMRs (and which ones do not).
+For this we use bedtools, intersecting a bed file of the sites with bed files of various features.
+```{r, engine = 'bash', eval = FALSE}
+today="$(date +'%d%m%y')"
+module load UHTS/Analysis/BEDTools/2.29.2
+
+# CpG islands
+bedtools intersect -a pop_DMCs_110422.bed -b stickleback_v5_cgiscan_tabfixed.bed > pop_DMCs_cpgi_${today}.bed
+
+# genes and promoters
+bedtools subtract -a stickleback_v5_ensembl_genesonly.bed -b stickleback_v5_ensembl_promoters.bed > stickleback_v5_ensembl_genes_prfilt.bed
+bedtools intersect -a pop_DMCs_110422.bed -b stickleback_v5_ensembl_genes_prfilt.bed > pop_DMCs_genes_${today}.bed
+bedtools intersect -a pop_DMCs_110422.bed -b stickleback_v5_ensembl_promoters.bed > pop_DMCs_promoters_${today}.bed
+
+# DMRs
+cat DMRs_AT_hypo_271121.bed DMRs_AT_hyper_271121.bed > DMRs_AT_all_271121.bed
+bedtools intersect -a pop_DMCs_110422.bed -b DMRs_AT_all_271121.bed > pop_DMCs_DMR_${today}.bed
+```
+
+Having identified which sites overlap with which features, we can then annotate the sitesNsamples with this information
+```{r}
+# cpgi
+cpgi<-read.table("site_beds/pop_DMCs_cpgi_120422.bed")[-3];cpgi$V2<-cpgi$V2+1;cpgi$ID<-paste(cpgi$V1,cpgi$V2,sep="_")
+sitesNsamples$cpgi<-ifelse(sitesNsamples$ID %in% cpgi$ID,"CpGI","nonCpGI")
+
+# promoters / genes
+genes<-read.table("site_beds/pop_DMCs_genes_120422.bed")[-3];genes$V2<-genes$V2+1;genes$ID<-paste(genes$V1,genes$V2,sep="_")
+promoters<-read.table("site_beds/pop_DMCs_promoters_120422.bed");promoters$V2<-promoters$V2+1;promoters$ID<-paste(promoters$V1,promoters$V2,sep="_")
+sitesNsamples$gene_feature<-ifelse(sitesNsamples$ID %in% genes$ID,"gene",
+                                   ifelse(sitesNsamples$ID %in% promoters$ID,"promoter","intergenic"))
+# DMRs/non-DMRs
+DMR<-read.table("site_beds/pop_DMCs_DMR_120422.bed")[-3];DMR$V2<-DMR$V2+1;DMR$ID<-paste(DMR$V1,DMR$V2,sep="_")
+sitesNsamples$DMR<-ifelse(sitesNsamples$ID %in% DMR$ID,"DMR","nonDMR")
+
+```
+We can then write the GTF, We will also get a table with the number of sites in each category
+```{r, eval=FALSE}
+for_gtf_allsites<-data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start,
+                        cat=paste(sitesNsamples$result_pop,"allsites",sep="_"))
+for_gtf_cpgi<-data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start,
+                        cat=paste(sitesNsamples$result_pop,sitesNsamples$cpgi,sep="_"))
+for_gtf_features<-data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start,
+                        cat=paste(sitesNsamples$result_pop,sitesNsamples$gene_feature,sep="_"))
+for_gtf_DMR<-data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start,
+                        cat=paste(sitesNsamples$result_pop,sitesNsamples$DMR,sep="_"))
+for_gtf<-rbind(for_gtf_allsites,for_gtf_cpgi,for_gtf_features,for_gtf_DMR)
+
+# write gtf of steps of 5bp extending 50bp either side of the focal sites
+writeGTF_SiteClass_windows(for_gtf,50,5,1,"C:/Users/jms_o/Documents/R/pop_results_steps_categories_120422.gtf")
+system("gzip C:/Users/jms_o/Documents/R/pop_results_steps_categories_120422.gtf")
+# this ends up being quite a massive gtf, so it must be gzipped!
+
+# get number of sites per result category
+n_sites_all<-sitesNsamples %>% group_by(result_pop) %>% 
+  summarise(n=n());n_sites_all$comp<-"allsites";n_sites_all$class<-"allsites"
+n_sites_cpgi<-sitesNsamples %>% group_by(cpgi,result_pop) %>% 
+  summarise(n=n());n_sites_cpgi$comp<-"cpgi";colnames(n_sites_cpgi)[1]<-"class"
+n_sites_features<-sitesNsamples %>% group_by(gene_feature,result_pop) %>%
+  summarise(n=n());n_sites_features$comp<-"gene_features";colnames(n_sites_features)[1]<-"class"
+n_sites_DMR <-sitesNsamples %>% group_by(DMR,result_pop) %>% 
+  summarise(n=n());n_sites_DMR$comp<-"DMR";colnames(n_sites_DMR)[1]<-"class"
+write.table(rbind(n_sites_all,n_sites_cpgi,n_sites_features,n_sites_DMR),file="n_sites_per_category.txt",sep="\t",quote=F,row.names = F)
+
+```
+Alternative is to do by chromosome, in sliding windows...
+```{r, eval=FALSE}
+for_gtf_allsites<-data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start,
+                        cat=paste(sitesNsamples$chr,sitesNsamples$result_pop,"allsites",sep="_"))
+for_gtf_cpgi<-data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start,
+                        cat=paste(sitesNsamples$chr,sitesNsamples$result_pop,sitesNsamples$cpgi,sep="_"))
+for_gtf_features<-data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start,
+                        cat=paste(sitesNsamples$chr,sitesNsamples$result_pop,sitesNsamples$gene_feature,sep="_"))
+for_gtf_DMR<-data.frame(chr=sitesNsamples$chr,start=sitesNsamples$start,
+                        cat=paste(sitesNsamples$chr,sitesNsamples$result_pop,sitesNsamples$DMR,sep="_"))
+for_gtf<-rbind(for_gtf_allsites,for_gtf_cpgi,for_gtf_features,for_gtf_DMR)
+
+# write gtf of steps of 5bp extending 50bp either side of the focal sites (5bp windows)
+writeGTF_SiteClass_windows(for_gtf,50,5,5,"C:/Users/jms_o/Documents/R/pop_results_windows_categories_120422.gtf")
+system("gzip C:/Users/jms_o/Documents/R/pop_results_windows_categories_120422.gtf")
+# this ends up being quite a massive gtf, so it must be gzipped!
+
+# get number of sites per result category
+n_sites_all<-sitesNsamples %>% group_by(result_pop,chr) %>% 
+  summarise(n=n());n_sites_all$comp<-"allsites";n_sites_all$class<-"allsites"
+n_sites_cpgi<-sitesNsamples %>% group_by(cpgi,result_pop,chr) %>% 
+  summarise(n=n());n_sites_cpgi$comp<-"cpgi";colnames(n_sites_cpgi)[1]<-"class"
+n_sites_features<-sitesNsamples %>% group_by(gene_feature,result_pop,chr) %>%
+  summarise(n=n());n_sites_features$comp<-"gene_features";colnames(n_sites_features)[1]<-"class"
+n_sites_DMR <-sitesNsamples %>% group_by(DMR,result_pop,chr) %>% 
+  summarise(n=n());n_sites_DMR$comp<-"DMR";colnames(n_sites_DMR)[1]<-"class"
+write.table(rbind(n_sites_all,n_sites_cpgi,n_sites_features,n_sites_DMR),file="n_sites_per_category_chromosome.txt",sep="\t",quote=F,row.names = F)
+
+```
+With a massive gtf (>1GB uncompressed) in hand, we then get the nucleotide diversity with popoolation more or less the same way as before...
+We can do this both for the single site steps version and the 5bp windows version.
+```{r, engine = 'bash', eval = FALSE}
+#!/bin/bash
+#SBATCH --mail-type=all
+#SBATCH --mail-user=james.ord@vetsuisse.unibe.ch
+#SBATCH --job-name="TK_popoolation_steps_120422.sh"
+#SBATCH --time=10:00:00
+#SBATCH --cpus-per-task=1
+#SBATCH --mem-per-cpu=100G
+
+gunzip pop_results_steps_categories_120422.gtf.gz
+
+for i in SRR869609:10 SRR7470095:12; do
+i1=$(echo $i | cut -d ":" -f 1)
+i2=$(echo $i | cut -d ":" -f 2)
+
+for k in pi theta D; do
+
+perl /storage/homefs/jo20n766/software/popoolation_1.2.2/Variance-at-position.pl --pool-size ${i2} --min-qual 20 --min-coverage 3 --min-count 2 --fastq-type sanger --max-coverage 500000000 \
+--pileup /storage/workspaces/vetsuisse_fiwi_epev/fiwi_epev001/datasets/dataset_collection/stickleback/PRJNA204958_479509/mapped/MAPQ20_rdup/pileup/${i1}.pileup \
+--gtf pop_results_steps_categories_120422.gtf --output ${i1}_temp.${k} --measure ${k}
+
+sed -i "s/$/\t${i1}/" ${i1}_temp.${k}
+
+done
+done
+
+cat *_temp.theta > temp.theta
+cat *_temp.pi > temp.pi
+cat *_temp.D > temp.D
+
+paste temp.pi <(cut -f 4 temp.theta) <(cut -f 4 temp.D) > pop_DMCs_steps_categories_120422.div
+
+rm *.theta *.pi *.D *.params
+
+gzip pop_results_steps_categories_120422.gtf
+```
+
+## APPENDIX: getting the bed files of genes and promoters
+
+A GFF3 of all genes coordinates is available here: https://stickleback.genetics.uga.edu/downloadData/
+I then convert this to BED using the bedops toolkit, and then grep only the whole gene coordinates, retaining only the gene ID in the attributes column.
+
+A BED of (arbitrarily defined, Heckwolf et al 2020) promoter regions can then be generated by specifying coordinates 1500bp downstream and 500bp upstream of the start of each gene.
+```{r, engine = 'bash', eval = FALSE}
+$ gff2bed < stickleback_v5_ensembl_genes.gff3 > stickleback_v5_ensembl_genes.bed
+$ cat stickleback_v5_ensembl_genes.bed | cut -f1 -d";"| grep 'gene' > stickleback_v5_ensembl_genesonly.bed
+
+# then, in R, make the promoters bed
+$ R
+> genes<-read.table("stickleback_v5_ensembl_genesonly.bed")
+> genes$V3<-genes$V2+500 # end is 2nd column (gene start) +500
+> genes$V2<-genes$V2-1500 # start is 2nd column -1500
+> genes$V2<-ifelse(genes$V2<1,1,genes$V2) # just in case any genes are at the very start of the chromosome
+> genes$V8<-"promoter"
+> write.table(genes,file="stickleback_v5_ensembl_promoters.bed",row.names=F,col.names=F,quote=F,sep="\t")
+> q()
+Save workspace image? [y/n/c]: n
+```

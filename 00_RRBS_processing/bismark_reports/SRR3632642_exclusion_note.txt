@@ -1,0 +1,6 @@
+It was noted in Artemov et al 2017 that one sample was excluded due to a low bisulfite conversion rate.
+SRR3632642 is likely to be this rejected sample given the very high proportions of methylated cytosines in non-CpG contexts (~17% compared to ~0.4% in other samples)
+According to Felix Krueger (Bismark dev), high % of non-CpG methylation can be an indicator of poor BS conversion: https://github.com/FelixKrueger/Bismark/issues/225
+We could confirm by aligning the sample to the lambda phage genome as spiked-in phage DNA is included in the samples.
+The phage DNA is used because the genome in completely unmethylated, so theoretically all cytosines should have been converted to thymines if the BS conversion was 100%
+https://www.ncbi.nlm.nih.gov/nuccore/215104
